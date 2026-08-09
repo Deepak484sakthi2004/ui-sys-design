@@ -1,4 +1,4 @@
-import type { Diagram } from "@/lib/types";
+import type { Diagram, DiagramNode } from "@/lib/types";
 
 const toneStyles: Record<string, string> = {
   green: "border-emerald-300 bg-emerald-50 text-emerald-900",
@@ -14,8 +14,32 @@ const legendColor: Record<string, string> = {
   analytics: "bg-amber-500",
 };
 
+function NodeCard({ n }: { n: DiagramNode }) {
+  return (
+    <div
+      className={`w-[168px] shrink-0 rounded-lg border px-3 py-2.5 text-center shadow-sm ${toneStyles[n.tone] ?? toneStyles.slate}`}
+    >
+      <div className="text-[13.5px] font-semibold leading-tight">{n.label}</div>
+      {n.sub && <div className="mt-0.5 text-[11px] opacity-80">{n.sub}</div>}
+      {n.mono && (
+        <div className="mt-1.5 rounded border border-dashed border-current/40 bg-white/50 px-1.5 py-0.5 font-mono text-[10.5px]">
+          {n.mono}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SystemDiagram({ diagram }: { diagram: Diagram }) {
-  const maxRow = Math.max(...diagram.nodes.map((n) => n.row));
+  // Group nodes into dense lanes by `row`, ordered left-to-right by `col`.
+  // This ignores absolute column indices, so no empty grid cells / holes ever
+  // appear regardless of how a problem's nodes were positioned.
+  const rowKeys = Array.from(new Set(diagram.nodes.map((n) => n.row))).sort(
+    (a, b) => a - b,
+  );
+  const lanes = rowKeys.map((r) =>
+    diagram.nodes.filter((n) => n.row === r).sort((a, b) => a.col - b.col),
+  );
 
   return (
     <section className="rounded-xl border border-[var(--border)] bg-white p-4 sm:p-5">
@@ -25,38 +49,18 @@ export function SystemDiagram({ diagram }: { diagram: Diagram }) {
         </div>
       </div>
 
-      {/* Grid of nodes. On small screens it scrolls horizontally. */}
-      <div className="overflow-x-auto">
-        <div
-          className="grid min-w-[720px] gap-x-4 gap-y-5"
-          style={{
-            gridTemplateColumns: "repeat(5, minmax(120px, 1fr))",
-            gridTemplateRows: `repeat(${maxRow}, auto)`,
-          }}
-        >
-          {diagram.nodes.map((n) => (
-            <div
-              key={n.id}
-              style={{ gridColumn: n.col, gridRow: n.row }}
-              className={`rounded-lg border px-3 py-2.5 text-center shadow-sm ${toneStyles[n.tone]}`}
-            >
-              <div className="text-[13.5px] font-semibold leading-tight">
-                {n.label}
-              </div>
-              {n.sub && (
-                <div className="mt-0.5 text-[11px] opacity-80">{n.sub}</div>
-              )}
-              {n.mono && (
-                <div className="mt-1.5 rounded border border-dashed border-current/40 bg-white/50 px-1.5 py-0.5 font-mono text-[10.5px]">
-                  {n.mono}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+      {/* Dense lanes. Each row is a tight flex line; wraps on small screens. */}
+      <div className="space-y-3">
+        {lanes.map((lane, i) => (
+          <div key={i} className="flex flex-wrap gap-3">
+            {lane.map((n) => (
+              <NodeCard key={n.id} n={n} />
+            ))}
+          </div>
+        ))}
       </div>
 
-      {/* Edge labels summarised as a flow list (arrows drawn textually). */}
+      {/* Edges rendered as a labelled flow list (the real connections). */}
       <div className="mt-5 grid gap-1.5 border-t border-[var(--border)] pt-4 text-[12px] text-slate-600 sm:grid-cols-2 lg:grid-cols-3">
         {diagram.edges.map((e, i) => {
           const from = diagram.nodes.find((n) => n.id === e.from)?.label;

@@ -56,7 +56,16 @@ export const metricsMonitoring: Problem = {
         row: 4,
         tone: "blue",
       },
-      { id: "streamagg", label: "Stream Processor", sub: "windowed rollups", col: 3, row: 5, tone: "orange" },
+      {
+        id: "compactor",
+        label: "Compactor",
+        sub: "ages hot blocks out",
+        mono: "10s → 5m → 1h",
+        col: 5,
+        row: 4,
+        tone: "blue",
+      },
+      { id: "streamagg", label: "Stream Processor", sub: "windowed alert eval", col: 3, row: 5, tone: "orange" },
       { id: "alertmgr", label: "Alertmanager", sub: "eval · dedupe · route", col: 4, row: 5, tone: "orange" },
     ],
     edges: [
@@ -69,8 +78,9 @@ export const metricsMonitoring: Problem = {
       { from: "kafka", to: "ingester", label: "consume · ordered per series", kind: "write" },
       { from: "ingester", to: "tsdb", label: "flush head block · RF=3", kind: "write" },
       { from: "kafka", to: "streamagg", label: "async fan-out", kind: "analytics" },
-      { from: "streamagg", to: "objstore", label: "5m/1h rollups", kind: "analytics" },
       { from: "streamagg", to: "alertmgr", label: "windowed rule eval", kind: "analytics" },
+      { from: "tsdb", to: "compactor", label: "blocks age past 15d", kind: "analytics" },
+      { from: "compactor", to: "objstore", label: "downsample 5m/1h", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · dashboards, sub-200ms p99" },
@@ -78,6 +88,25 @@ export const metricsMonitoring: Problem = {
       { kind: "analytics", text: "background · rollups & alerting, async" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["agent", "collector", "dashboard", "qfrontend", "querier"],
+      say: "Two independent paths behind their own entry points: agents push metrics in on the write side, Grafana queries come in on the read side. At 50M points/sec against maybe 10K dashboard queries/sec, the write side is the one that has to survive scale — nothing is durable yet, that's next.",
+    },
+    {
+      reveal: ["kafka", "ingester", "tsdb"],
+      say: "The gateway hands validated points to Kafka, partitioned by hash(metric + labels) so every point for a series lands on the same partition in order. Ingesters consume in that order and Gorilla-encode each series into an in-memory head block, flushed to TSDB storage as an immutable compressed chunk — the last 15 days the query engine now reads from.",
+    },
+    {
+      reveal: ["compactor", "objstore"],
+      say: "Data doesn't stay at full resolution forever. As blocks age past 15 days, a background compactor downsamples them to 5-minute then 1-hour resolution and rewrites them to object storage — 10-50x cheaper per byte — and the query engine merges hot and cold transparently when a range spans both.",
+    },
+    {
+      reveal: ["streamagg", "alertmgr"],
+      say: "Alerting runs off the same Kafka firehose, not off a query. The stream processor evaluates rules over sliding windows with a debounce so a 10-second blip never pages anyone, and Alertmanager groups a fleet-wide root cause into one notification instead of two hundred.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -98,12 +127,12 @@ export const metricsMonitoring: Problem = {
       { id: "NFR-01", text: "Sustained ingestion throughput", tag: "50M points/sec" },
       { id: "NFR-02", text: "Ingestion latency, agent to queryable", tag: "p99 < 15s" },
       { id: "NFR-03", text: "Dashboard query latency, hot tier (last 15d)", tag: "p99 < 200ms" },
-      { id: "NFR-04", text: "Alert evaluation latency, breach to page", tag: "< 60s" },
+      { id: "NFR-04", text: "Alert notification latency, confirmed breach to page", tag: "< 60s" },
       { id: "NFR-05", text: "Availability (about 4.4 hours downtime per year)", tag: "99.95%" },
       { id: "NFR-06", text: "Ingestion durability: no silent data loss", tag: "at-least-once" },
       { id: "NFR-07", text: "Storage compression ratio vs naive 16 bytes/point", tag: "~12:1" },
       { id: "NFR-08", text: "Active time-series capacity the cluster is provisioned for", tag: "500M series" },
-      { id: "NFR-09", text: "Write-to-query ratio that anchors the whole design", tag: "1000:1" },
+      { id: "NFR-09", text: "Write-to-query ratio that anchors the whole design", tag: "~5000:1" },
     ],
   },
 
@@ -114,11 +143,11 @@ export const metricsMonitoring: Problem = {
       title: "Sizing: cardinality is the metric, not the row count",
       body: [
         "Unlike a system sized by row count, a metrics system is sized by time series — a unique combination of metric name and label set. Start with the boring baseline: 100K hosts, each emitting roughly 1,000 system and app metrics, gives 100M series before a single team adds a custom tag. That baseline is stable and easy to provision for.",
-        "The number that actually matters is what one metric with a bad label does to that baseline. Tag a single metric with customer_id (5M distinct values) or request_id (unbounded) and that one metric alone can out-grow the entire rest of the fleet. 500M active series is the budget the design is provisioned for after cardinality limits are enforced — it is a target, not an emergent accident.",
+        "The number that actually matters is what one metric with a bad label does to that baseline. Tag a single metric with customer_id (5M distinct values) and it alone adds roughly 1% on top of the entire fleet's budget — bad, but survivable. Tag one with request_id or a raw UUID — effectively unbounded — and that single metric keeps minting new series every second, capable of out-growing the entire rest of the fleet within hours. 500M active series is the budget the design is provisioned for after cardinality limits are enforced — it is a target, not an emergent accident.",
       ],
       bullets: [
         { lead: "Base cardinality", text: "100K hosts × 1K metrics/host = 100M series from infrastructure metrics alone." },
-        { lead: "One bad label", text: "a single metric tagged with a high-cardinality dimension (customer_id, request_id, UUID) can out-cardinality the entire rest of the system by itself." },
+        { lead: "One bad label", text: "a single metric tagged with an effectively unbounded dimension (request_id, UUID) can out-cardinality the entire rest of the system by itself; even a bounded-but-large one (customer_id) adds a meaningful chunk on its own." },
         { lead: "500M is the budget, not a guess", text: "it's what the cluster is provisioned for after cardinality limits are enforced at the gateway (Learn #4), not a number that just happens." },
       ],
       pictureTitle: "Where do 500M time series come from?",
@@ -269,7 +298,7 @@ export const metricsMonitoring: Problem = {
         problem: "Evaluate alert rules on a live, occasionally-late stream without paging on noise.",
         solution: "Windowed rule evaluation with a sustained-breach 'for' duration, a small watermark delay for late data, and Alertmanager-side grouping/dedup.",
         why: "A single sample is not a signal; a sustained window is. And a fleet-wide root cause shouldn't produce a fleet-wide number of pages.",
-        tradeoff: "The 'for' duration and watermark delay both trade a little alerting latency for far fewer false pages — directly against the < 60s NFR budget.",
+        tradeoff: "The 'for' duration is a per-rule noise/latency trade-off chosen independently of the paging SLA — it delays when a rule is allowed to *start* firing. The < 60s NFR budget is measured from that confirmed-firing moment to notification, so it's the evaluation tick plus the watermark delay plus Alertmanager routing that eat into it, not the 'for' duration itself.",
         failure: "Alerting on raw points pages on-call for transient blips; ungrouped notifications during a real incident bury the one page that matters under 200 duplicates.",
         mitigation: "Tune 'for' duration and watermark per rule based on its noise profile, and route related alerts through Alertmanager's grouping keys.",
       },
@@ -344,12 +373,14 @@ export const metricsMonitoring: Problem = {
         kind: "analytics",
         title: "ANALYTICS · ROLLUPS & ALERTING · NEVER BLOCKS INGEST",
         summary:
-          "A stream processor consumes the same Kafka topic asynchronously. It writes downsampled rollups to cold storage and evaluates alert rules over sliding windows, handing breaches to Alertmanager for grouping and routing.",
+          "Two independent background jobs, neither on the ingest path. A stream processor consumes the Kafka firehose to evaluate alert rules over sliding windows, handing breaches to Alertmanager. Separately, a compactor ages 10s blocks out of the hot tier and rewrites them downsampled into object storage.",
         steps: [
           { label: "Kafka", note: "async fan-out, second consumer group" },
-          { label: "Stream Processor", note: "5m/1h tumbling windows" },
+          { label: "Stream Processor", note: "sliding-window alert eval" },
+          { label: "Alertmanager", note: "dedupe, group, route" },
+          { label: "TSDB hot tier", note: "blocks age past 15d" },
+          { label: "Compactor", note: "downsamples to 5m/1h" },
           { label: "Object Store", note: "downsampled rollups written" },
-          { label: "Alertmanager", note: "windowed rule eval, dedupe, group, route" },
         ],
       },
     ],
@@ -434,7 +465,7 @@ export const metricsMonitoring: Problem = {
       steps: [
         { kind: "DRAW", text: 'Lay down the **write lane**: Agent → Ingestion Gateway → Kafka → TSDB Ingester → TSDB block flush. Label arrows **"50M points/sec"**, **"partitioned by hash(metric+labels)"**, **"RF=3"**.' },
         { kind: "DRAW", text: 'Add the **read lane**: Dashboard → Query Frontend (cache) → Query Engine → TSDB hot tier or Object Store, routed by time range. Label **"sub-200ms p99"**, **"> 15d → downsampled"**.' },
-        { kind: "DRAW", text: 'Add the **background lane** off Kafka: → Stream Processor → Object Store (rollups) and → Alertmanager (windowed eval, grouping). Label **"async, never blocks ingestion"**.' },
+        { kind: "DRAW", text: 'Add the **background lane**: off Kafka, → Stream Processor → Alertmanager (windowed eval, grouping). Separately off TSDB, → Compactor → Object Store (downsamples as blocks age past 15d). Label both **"async, never blocks ingestion"**.' },
         { kind: "SAY", text: '"Three lanes because they have three different failure tolerances — losing a write is unacceptable, a slow dashboard is annoying, a late alert evaluation is a correctness bug, not an outage."' },
       ],
       grading: "Three clearly separated lanes, arrows labeled with throughput/latency, and an explicit statement of why each lane has different infra.",
@@ -591,7 +622,7 @@ export const metricsMonitoring: Problem = {
         heading: "The one-line mental model",
         body: [
           "This is a write-heavy time-series store with two side channels — dashboards and alerting — bolted onto a shared ingestion pipeline. The core operation is appending a (timestamp, value) point to the correct series and, eventually, letting someone aggregate over a range of those points. Everything expensive (compression, sharding, cardinality limits) exists to keep that append cheap and unbounded-safe at 50M points/sec.",
-          "Anchor everything on five numbers: 500M active series, 50M points/sec ingested, a sub-200ms p99 dashboard query, a sub-60s breach-to-page alert budget, and a write:query ratio of roughly 1000:1. Every structural choice below is a consequence of these numbers, not a preference.",
+          "Anchor everything on five numbers: 500M active series, 50M points/sec ingested, a sub-200ms p99 dashboard query, a sub-60s breach-to-page alert budget, and a write:query ratio of roughly 5000:1 (50M writes/sec against ~10K dashboard queries/sec). Every structural choice below is a consequence of these numbers, not a preference.",
         ],
       },
       {

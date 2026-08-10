@@ -100,6 +100,8 @@ export const uber: Problem = {
       { from: "dispatch", to: "eta_pricing", label: "ETA + fare + surge", kind: "read" },
       { from: "dispatch", to: "trip_svc", label: "atomic claim · assign driver", kind: "write" },
       { from: "trip_svc", to: "trips_db", label: "CAS transition · LOCAL_QUORUM", kind: "write" },
+      { from: "trip_svc", to: "driver", label: "push offer · 10-15s TTL", kind: "write" },
+      { from: "driver", to: "trip_svc", label: "accept / reject", kind: "write" },
       { from: "driver", to: "location_svc", label: "gRPC stream · ~4s cadence", kind: "write" },
       { from: "location_svc", to: "geo_index", label: "upsert H3 cell", kind: "write" },
       { from: "location_svc", to: "kafka", label: "async fan-out", kind: "analytics" },
@@ -112,6 +114,29 @@ export const uber: Problem = {
       { kind: "analytics", text: "analytics · surge & ETA calibration, never blocks a match" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["rider", "lb", "dispatch"],
+      say: "A ride request is a stateless call: Rider App through a regional load balancer to a stateless Dispatch Service. Everything else on this board exists to answer 'who's nearby and free' fast enough to hit a 5-second p95.",
+    },
+    {
+      reveal: ["geo_index", "eta_pricing"],
+      say: "Dispatch runs a two-stage funnel. An H3 k-ring query against the Geo Index gives a cheap geometric shortlist, then ETA & Pricing ranks that shortlist by real road-graph time and quotes the surge-adjusted fare.",
+    },
+    {
+      reveal: ["trip_svc", "trips_db", "driver"],
+      say: "Dispatch hands the winning candidate to Trip Service, which does an atomic compare-and-swap claim so exactly one rider ever gets that driver, persists the transition to Cassandra, and pushes the offer to the Driver App to accept or reject.",
+    },
+    {
+      reveal: ["location_svc"],
+      say: "Every online driver holds a long-lived stream into Location Ingestion, pushing a position every ~4 seconds — 1.25M writes/sec that synchronously keep the Geo Index fresh.",
+    },
+    {
+      reveal: ["kafka", "flink"],
+      say: "Location pings also fan out asynchronously into Kafka. Flink aggregates supply and demand per H3 cell into a smoothed surge multiplier and recalibrates road-graph traffic weights, feeding back into ETA & Pricing without ever touching the match path.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -155,14 +180,14 @@ export const uber: Problem = {
         { lead: "TTL as a heartbeat", text: "each location key carries a ~15-20s TTL, so a driver who stops pinging (crash, app kill, tunnel) silently ages out of the matching pool without an explicit offline event." },
       ],
       pictureTitle: "Write load vs. read load on the geo index",
-      pictureCaption: "writes: ~1.25M/s (location pings) · reads: ~175/s average (match requests) — a 1000:1 write-dominated index",
+      pictureCaption: "writes: ~1.25M/s (location pings) · reads: ~175/s average (match requests) — over 1000:1 write-dominated index",
       pictureRows: [
         { label: "Location pings", value: "~1.25M/s sustained, 5M drivers × 1/4s", tone: "bad" },
         { label: "Match queries", value: "~175/s average, city-level bursts", tone: "good" },
       ],
       remember: {
         problem: "What single number should size the geo index and ingestion tier?",
-        solution: "~1.25M location writes/sec (5M drivers ÷ 4s ping interval), roughly 1000× the ~175/s average match-query rate.",
+        solution: "~1.25M location writes/sec (5M drivers ÷ 4s ping interval), well over 1000× the ~175/s average match-query rate.",
         why: "Driver location is pushed continuously whether or not anyone is requesting a ride; matching is comparatively rare.",
         tradeoff: "Designing for write throughput means the index must support cheap, frequent upserts — not the read-optimized structures a typical system reaches for first.",
         failure: "Sizing the index off read QPS alone leaves it unable to absorb the ping firehose, and it falls behind within seconds under real traffic.",
@@ -408,7 +433,7 @@ export const uber: Problem = {
         heading: "MUST MENTION",
         icon: "📣",
         items: [
-          "The write:read ratio on the geo index is roughly 1000:1 — the opposite of most systems",
+          "The write:read ratio on the geo index is well over 1000:1 — the opposite of most systems",
           "Surge must be smoothed/capped or it becomes untrustworthy and gameable",
           "Sharding by geography bounds both load and blast radius per shard",
         ],

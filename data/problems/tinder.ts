@@ -69,7 +69,7 @@ export const tinder: Problem = {
       {
         id: "swipeStore",
         label: "Cassandra",
-        sub: "swipe log · partitioned by swiper_id",
+        sub: "swipe log + matches · partitioned by swiper_id",
         col: 4,
         row: 2,
         tone: "blue",
@@ -103,7 +103,8 @@ export const tinder: Problem = {
       { from: "swipe", to: "swipeStore", label: "insert swipe · LOCAL_QUORUM", kind: "write" },
       { from: "swipe", to: "swipeStore", label: "point lookup: did target already like me?", kind: "read" },
       { from: "swipe", to: "matchSvc", label: "mutual like → create match", kind: "write" },
-      { from: "matchSvc", to: "push", label: "notify both users", kind: "write" },
+      { from: "matchSvc", to: "swipeStore", label: "insert match row · conditional write on (min,max)", kind: "write" },
+      { from: "matchSvc", to: "push", label: "fire-and-forget · notify both users", kind: "analytics" },
       { from: "swipe", to: "kafka", label: "swipe/match event, fire-and-forget", kind: "analytics" },
       { from: "kafka", to: "recoJob", label: "stream", kind: "analytics" },
       { from: "swipeStore", to: "recoJob", label: "swipe history batch", kind: "analytics" },
@@ -113,9 +114,32 @@ export const tinder: Problem = {
     legend: [
       { kind: "read", text: "read path · feed fetch, ~2.8K batches/sec peak" },
       { kind: "write", text: "write path · swipe + match, ~55K/sec peak" },
-      { kind: "analytics", text: "async · queue refill, scoring, never blocks a swipe" },
+      { kind: "analytics", text: "async · queue refill, scoring, notification fan-out — never blocks a swipe" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "discovery", "swipe"],
+      say: "Two stateless services split from the start: Discovery serves the candidate feed, Swipe records the write. Unlike a typical 100:1 read-heavy app, these run at nearly the same rate — every card shown gets swiped.",
+    },
+    {
+      reveal: ["queueCache", "esGeo"],
+      say: "The swipe deck never waits on a live geo query. A background job keeps a queue of ~500 ranked candidates per user in Redis; Elasticsearch's geohash index is only touched to refill that queue, not on every card pull.",
+    },
+    {
+      reveal: ["swipeStore"],
+      say: "Cassandra holds the swipe log, partitioned by swiper_id. That partitioning is what turns 'did they already like me back' into a single-partition point lookup instead of a scan.",
+    },
+    {
+      reveal: ["matchSvc", "push"],
+      say: "On a mutual like, Swipe hands off to Match Service, which does a conditional write on the unordered pair so a simultaneous double-swipe can't create two match rows, then fires an async notification through the Push Gateway — never on the swipe's critical path.",
+    },
+    {
+      reveal: ["kafka", "recoJob"],
+      say: "Swipe and match events stream through Kafka into Flink/Spark, which recomputes ranked candidate queues and dampens popularity scores — async, so a lag here never stalls a swipe.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -371,19 +395,20 @@ export const tinder: Problem = {
           { label: "Swipe Service", note: "stateless" },
           { label: "Cassandra insert", note: "LOCAL_QUORUM, partitioned by swiper_id" },
           { label: "Point lookup (right-swipes only)", note: "swiper_id = target, swipee_id = me, LOCAL_ONE" },
-          { label: "Match Service", note: "conditional write on unordered pair, dedupes the race" },
+          { label: "Match Service", note: "conditional write to Cassandra on unordered pair (min,max), dedupes the race" },
         ],
       },
       {
         kind: "analytics",
         title: "ASYNC · QUEUE REFILL, SCORING, NOTIFICATIONS · NEVER BLOCKS A SWIPE",
         summary:
-          "Swipe and match events stream to Kafka. A background job recomputes each user's candidate queue and desirability scores; a separate fan-out step delivers match notifications without sitting on the swipe write.",
+          "Two separate async branches off the write path: swipe events stream to Kafka for queue refill and scoring, while match notifications go straight from the Match Service to the Push Gateway without waiting on that stream.",
         steps: [
-          { label: "Swipe/Match Service", note: "emits an event, fire-and-forget" },
+          { label: "Swipe Service", note: "emits swipe + match events to Kafka, fire-and-forget" },
           { label: "Kafka", note: "swipe + match event stream" },
           { label: "Flink/Spark", note: "recomputes ranked candidate queues, dampens popularity signal" },
           { label: "Redis Queue Cache", note: "refilled before the low-water mark" },
+          { label: "Match Service", note: "separately, fires the match notification directly — does not wait on the Kafka pipeline" },
           { label: "Push Gateway", note: "APNs/FCM or WebSocket, target < 2s from match to alert" },
         ],
       },
@@ -464,7 +489,7 @@ export const tinder: Problem = {
       why: "Drawing three lanes shows you understand these paths have different SLAs and failure tolerances. A candidate who draws one blob usually ends up putting notification delivery inline with the swipe write, which is the most common structural mistake in this design.",
       steps: [
         { kind: "DRAW", text: 'Lay down the **read lane**: Client → LB → Discovery Service → Redis Queue Cache → Elasticsearch (on miss). Label **"~95% cache hit"**, **"20 candidates/batch"**.' },
-        { kind: "DRAW", text: 'Add the **write lane**: Client → LB → Swipe Service → Cassandra insert, then a point-lookup read back to Cassandra, then → Match Service on a hit. Label **"LOCAL_QUORUM insert"**, **"LOCAL_ONE point lookup"**.' },
+        { kind: "DRAW", text: 'Add the **write lane**: Client → LB → Swipe Service → Cassandra insert, then a point-lookup read back to Cassandra, then → Match Service on a hit, which writes the match row back to Cassandra with a conditional insert. Label **"LOCAL_QUORUM insert"**, **"LOCAL_ONE point lookup"**.' },
         { kind: "DRAW", text: 'Add the **async lane**, dashed: Swipe Service → Kafka → Flink/Spark → refills Redis Queue Cache; Match Service → Push Gateway. Label **"never blocks a swipe ack"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they have three different tolerances — the swipe write must never fail silently, the read lane can be slightly stale, and the async lane can retry."' },
       ],

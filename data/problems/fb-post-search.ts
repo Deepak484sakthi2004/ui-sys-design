@@ -7,7 +7,7 @@ export const fbPostSearch: Problem = {
   level: "Hard",
   deepDiveAvailable: true,
   intro: [
-    "Design search over Facebook posts and comments for roughly 3B users: a corpus of hundreds of billions of items growing by ~500M new posts/comments a day, serving ~1.5B searches/day (~20K qps sustained, ~60K qps peak), where a new post must become searchable within about 10 seconds and every single result must be filtered to only what the specific searcher is allowed to see.",
+    "Design search over Facebook posts and comments for roughly 3B users: a corpus of hundreds of billions of items growing by ~500M new posts/comments a day, serving ~1.7B searches/day (~20K qps sustained, ~60K qps peak), where a new post must become searchable within about 10 seconds and every single result must be filtered to only what the specific searcher is allowed to see.",
   ],
   hardParts:
     "The hard parts: making privacy filtering part of the index intersection itself instead of a slow post-filter over billions of candidates, keeping a graph-scale inverted index freshly mutable while ingesting hundreds of millions of edits a day (classic inverted indexes assume near-immutable batches), and ranking on text relevance plus social-graph proximity plus recency without the extra graph lookups blowing the latency budget.",
@@ -53,8 +53,8 @@ export const fbPostSearch: Problem = {
       { from: "query-svc", to: "aggregator", kind: "read" },
       { from: "aggregator", to: "unicorn", label: "fan-out · text ∩ ACL postings", kind: "read" },
       { from: "aggregator", to: "ranker", label: "merged top-K", kind: "read" },
-      { from: "ranker", to: "privacy-check", label: "final rerank", kind: "read" },
-      { from: "privacy-check", to: "search-client", label: "results", kind: "read" },
+      { from: "ranker", to: "privacy-check", label: "reranked top-K", kind: "read" },
+      { from: "privacy-check", to: "tao", label: "sync ACL recheck", kind: "read" },
     ],
     legend: [
       { kind: "read", text: "read path · search query, privacy-filtered results" },
@@ -62,6 +62,29 @@ export const fbPostSearch: Problem = {
       { kind: "analytics", text: "async indexing pipeline · never blocks the post write" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client-write", "post-svc", "tao"],
+      say: "Start with the write path: a post goes to Post Service and is written synchronously to TAO, our graph store of record — durable immediately, before anything about search happens.",
+    },
+    {
+      reveal: ["log", "indexer", "unicorn"],
+      say: "Off that critical path, TAO's changes flow through a CDC log to an Indexing Tier that tokenizes text and builds privacy postings, landing in Unicorn shards within about 10 seconds — freshness, not the write path.",
+    },
+    {
+      reveal: ["search-client", "query-svc", "aggregator"],
+      say: "On the read side, a search query goes through Query Service to parse and expand it, then to a Broker that fans it out to the searcher's graph-local shards.",
+    },
+    {
+      reveal: ["ranker"],
+      say: "Unicorn shards score locally and return a bounded top-K; the Ranking Service does one batched ML rerank on the merged set, folding in social-graph proximity and engagement.",
+    },
+    {
+      reveal: ["privacy-check"],
+      say: "Before anything reaches the client, the Privacy Service re-checks the small final result set synchronously against TAO — a second, authoritative layer that closes any staleness gap the async index couldn't avoid.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -318,7 +341,7 @@ export const fbPostSearch: Problem = {
         items: [
           "3B users, hundreds of billions of posts/comments indexed",
           "~500M new items/day ≈ 6K/sec sustained, ~50K/sec peak",
-          "~1.5B searches/day ≈ 20K qps sustained, ~60K qps peak",
+          "~1.7B searches/day ≈ 20K qps sustained, ~60K qps peak",
           "Freshness target: post creation to searchable, < 10s",
           "Latency: p50 < 50ms, p99 < 200ms end to end",
           "Over-fetch multiplier for the secondary ACL check: ~3-5x page size",
@@ -545,7 +568,7 @@ export const fbPostSearch: Problem = {
         heading: "The one-line mental model",
         body: [
           "This is a graph-aware inverted index, not a plain text search engine. The reason it's a genuinely different system from Elasticsearch-over-posts is that the correct answer to identical query text is different for every searcher, so privacy can't be an afterthought — it has to be part of retrieval itself.",
-          "Anchor everything on the numbers: ~3B users, hundreds of billions of posts/comments, ~500M new items/day (~6K/sec sustained, 50K peak), ~1.5B searches/day (~20K qps sustained, 60K peak), a ~10s freshness target, and a hard zero-tolerance requirement on privacy leaks. Every structural choice below is a consequence of these, especially the last one.",
+          "Anchor everything on the numbers: ~3B users, hundreds of billions of posts/comments, ~500M new items/day (~6K/sec sustained, 50K peak), ~1.7B searches/day (~20K qps sustained, 60K peak), a ~10s freshness target, and a hard zero-tolerance requirement on privacy leaks. Every structural choice below is a consequence of these, especially the last one.",
         ],
       },
       {

@@ -74,8 +74,8 @@ export const paymentSystem: Problem = {
       { from: "orchestrator", to: "kafka", label: "outbox: PaymentSucceeded", kind: "analytics" },
       { from: "kafka", to: "webhook", label: "at-least-once", kind: "analytics" },
       { from: "webhook", to: "client", label: "signed webhook → merchant", kind: "analytics" },
-      { from: "kafka", to: "reconcile", label: "settlement stream", kind: "analytics" },
-      { from: "reconcile", to: "ledger", label: "match vs. bank file, T+1", kind: "analytics" },
+      { from: "kafka", to: "reconcile", label: "payment events, for matching", kind: "analytics" },
+      { from: "ledger", to: "reconcile", label: "ledger records vs. bank file, T+1", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · status checks" },
@@ -83,6 +83,29 @@ export const paymentSystem: Problem = {
       { kind: "analytics", text: "async · webhooks & reconciliation, never blocks a charge" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "orchestrator", "psp", "ledger"],
+      say: "Start with the bare charge: a client posts to the Payment API, the Orchestrator calls out to the card network, and on approval it posts a balanced pair into the ledger. That's the whole happy path — everything else in this design exists to make it safe under retries and failure.",
+    },
+    {
+      reveal: ["idempotency"],
+      say: "Before it does anything else, the Idempotency Store checks {key → request hash → response} with a 24h TTL, so a client retry after a timeout replays the cached result instead of charging the card twice.",
+    },
+    {
+      reveal: ["risk", "vault"],
+      say: "Before the Orchestrator ever calls the network: Risk scores the payment against warm, precomputed features in under 50ms, and the Vault detokenizes the card — the orchestrator and everything downstream only ever sees an opaque token, never a raw PAN.",
+    },
+    {
+      reveal: ["kafka", "webhook"],
+      say: "The Orchestrator drops an outbox event into Kafka and returns immediately; the Webhook Service delivers it to the merchant at-least-once, so a slow or broken merchant endpoint never adds latency to a charge.",
+    },
+    {
+      reveal: ["reconcile"],
+      say: "Kafka's payment-event stream and a direct read of the Ledger both feed the Reconciliation Job, which matches our records against the bank's settlement file every T+1 — the ground-truth safety net that catches anything the online path got wrong.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -429,7 +452,7 @@ export const paymentSystem: Problem = {
       steps: [
         { kind: "DRAW", text: 'Lay down the **write/authorize path**: Client → Payment API → Idempotency Store → Orchestrator → Risk Engine → Vault → Card Network/PSP → Ledger. Label the arrows **"idempotency lookup"**, **"score, sync"**, **"detokenize"**, **"authorize+capture ~300ms"**.' },
         { kind: "DRAW", text: 'Add the **read/status path** as a thin separate arrow: Client → Payment API → Ledger (read replica), labeled **"GET /payments/:id"**.' },
-        { kind: "DRAW", text: 'Add the **async lane** dropping off the Orchestrator: → Kafka → Webhook Service → Merchant, and Kafka → Reconciliation Job → Ledger, dashed, labeled **"never blocks a charge"**.' },
+        { kind: "DRAW", text: 'Add the **async lane** dropping off the Orchestrator: → Kafka → Webhook Service → Merchant, and Kafka → Reconciliation Job, which also reads the Ledger to compare against the bank file — dashed, labeled **"never blocks a charge"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes with three different guarantees — authorize is synchronous and must be correct, status reads are cheap, and webhooks/reconciliation are async and best-effort by design."' },
       ],
       grading: "Three clearly separated lanes, the authorize path fully labeled step by step, and an explicit statement that async work never blocks a charge.",

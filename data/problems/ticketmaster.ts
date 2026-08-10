@@ -55,7 +55,7 @@ export const ticketmaster: Problem = {
         tone: "blue",
       },
       { id: "payment", label: "Payment Service", sub: "Stripe · idempotency key", col: 5, row: 2, tone: "purple" },
-      { id: "kafka", label: "Kafka", sub: "order & hold events", col: 2, row: 3, tone: "orange" },
+      { id: "kafka", label: "Kafka", sub: "order, hold & release events", col: 2, row: 3, tone: "orange" },
       { id: "reaper", label: "Hold Reaper", sub: "expires stale holds", col: 3, row: 3, tone: "orange" },
       { id: "notify", label: "Notification Service", sub: "email/SMS · QR ticket", col: 4, row: 3, tone: "orange" },
     ],
@@ -71,8 +71,9 @@ export const ticketmaster: Problem = {
       { from: "payment", to: "inventory", label: "confirm sale", kind: "write" },
       { from: "seatsvc", to: "kafka", label: "hold created", kind: "analytics" },
       { from: "payment", to: "kafka", label: "order placed", kind: "analytics" },
-      { from: "kafka", to: "reaper", label: "TTL sweep", kind: "analytics" },
-      { from: "reaper", to: "inventory", label: "release expired", kind: "analytics" },
+      { from: "redis", to: "reaper", label: "keyspace notify · near-instant", kind: "analytics" },
+      { from: "reaper", to: "inventory", label: "sweep + release expired", kind: "analytics" },
+      { from: "reaper", to: "kafka", label: "hold released", kind: "analytics" },
       { from: "kafka", to: "notify", label: "async", kind: "analytics" },
       { from: "kafka", to: "search", label: "CDC index update", kind: "analytics" },
     ],
@@ -82,6 +83,33 @@ export const ticketmaster: Problem = {
       { kind: "analytics", text: "async · notifications, indexing, hold reaping — never blocks booking" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "seatsvc", "inventory"],
+      say: "Start with the core write problem, not the browsing app: a client asks to hold a seat, a stateless Seat Hold Service is the only thing that touches the seat's row, and Postgres is the single source of truth for seat_status.",
+    },
+    {
+      reveal: ["cdn", "search"],
+      say: "Browsing is the opposite problem — high fan-out, low consistency, cacheable everywhere. CDN serves static event/venue pages, Elasticsearch handles search and filtering, and only the seat-selection screen reaches back into live inventory.",
+    },
+    {
+      reveal: ["redis"],
+      say: "A held seat can't stay locked out forever. Valkey stores an 8-minute TTL per hold, so a seat someone abandons comes back on sale automatically instead of sitting dead.",
+    },
+    {
+      reveal: ["waitingroom"],
+      say: "None of this survives 2 million fans hitting one 50,000-seat on-sale directly — connection pools exhaust before the lock code even runs. A virtual waiting room throttles admission into the Seat Hold Service to whatever rate Postgres can safely sustain.",
+    },
+    {
+      reveal: ["payment"],
+      say: "Payment Service closes the loop with an idempotency key: charge success and the seat flipping to sold commit together, so a client retry after a timeout can never double-charge or leave a paid seat unconfirmed.",
+    },
+    {
+      reveal: ["kafka", "reaper", "notify"],
+      say: "Everything after that is async off Kafka: notifications and the QR ticket, and CDC into the search index. Hold expiry runs on its own rail — Redis keyspace notifications plus a periodic reaper sweep — and the reaper republishes a release event so search stays in sync. None of it can slow down or fail a purchase.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -312,7 +340,7 @@ export const ticketmaster: Problem = {
       "Overselling is prevented with a pessimistic row lock held only for milliseconds to flip a seat to 'held', backed by a TTL so an abandoned hold releases the seat automatically.",
       "A virtual waiting room throttles admission into the booking path at exactly the rate the database can safely process transactions, so a 2M-user spike never reaches the seat-lock code at all.",
       "Payment goes through an idempotency key so a client retry after a timeout can never double-charge or double-confirm a seat.",
-      "Search, notifications, and the hold reaper all run off Kafka, off the booking path, so a slow search index never slows down a checkout.",
+      "Search and notifications run off Kafka; hold expiry runs off Redis TTL plus a periodic reaper sweep — none of it sits on the booking path, so a slow search index never slows down a checkout.",
     ],
     flows: [
       {
@@ -346,13 +374,14 @@ export const ticketmaster: Problem = {
         kind: "analytics",
         title: "ASYNC · NOTIFICATIONS, INDEXING, HOLD REAPING",
         summary:
-          "Once a sale commits, everything else reacts to a Kafka event. None of it can slow down or fail a purchase, and a periodic reaper sweeps expired holds as a safety net independent of Redis TTL notifications.",
+          "Once a sale commits, everything else reacts to a Kafka event. Hold expiry runs on its own rail: a Redis TTL fires a keyspace notification for near-instant release, backed by a periodic DB sweep as a safety net; the reaper then republishes so search stays in sync. None of it can slow down or fail a purchase.",
         steps: [
           { label: "Payment Service", note: "emits 'order placed'" },
-          { label: "Kafka", note: "order & hold events" },
+          { label: "Valkey", note: "hold TTL expiry → keyspace notification" },
+          { label: "Hold Reaper", note: "near-instant release + periodic DB sweep safety net" },
+          { label: "Kafka", note: "order, hold, and release events" },
           { label: "Notification Service", note: "email/SMS + QR ticket" },
-          { label: "Search Indexer", note: "CDC → Elasticsearch availability" },
-          { label: "Hold Reaper", note: "TTL sweep, safety net for expired holds" },
+          { label: "Search Indexer", note: "CDC → Elasticsearch availability, including released seats" },
         ],
       },
     ],

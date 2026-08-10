@@ -89,6 +89,25 @@ export const chatgpt: Problem = {
     ],
   },
 
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "orchestrator", "router", "inference"],
+      say: "Start with the shape of one request: client through the gateway to a stateless orchestrator, which hands the assembled prompt to a model router, and the router places it on the inference cluster, which streams tokens straight back over SSE. That's the loop before any of the optimizations that make it fast.",
+    },
+    {
+      reveal: ["history", "moderation"],
+      say: "Two synchronous stops happen before a token is generated: the orchestrator pulls the last N turns from the Conversation Store to rebuild context, and a small classifier checks the input in under 50ms, both completing before the prompt ever reaches a GPU. Output gets the same check, streamed incrementally as tokens come back.",
+    },
+    {
+      reveal: ["kvcache"],
+      say: "The KV Cache Pool is what makes a follow-up turn cheap: it lives in GPU HBM right next to the inference cluster, and sticky routing by hash(conversation_id) means a warm conversation only prefills the new message instead of re-processing the whole history.",
+    },
+    {
+      reveal: ["kafka", "usage", "analytics"],
+      say: "Everything off the critical path fires into Kafka and moves on: Usage Metering turns token events into billing, and ClickHouse holds them for abuse review and dashboards. Neither can ever add a millisecond to a token stream.",
+    },
+  ],
+
   // -------------------------------------------------------------------------
   requirements: {
     functional: [

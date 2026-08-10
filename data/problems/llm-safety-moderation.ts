@@ -52,8 +52,8 @@ export const llmSafetyModeration: Problem = {
         row: 1,
         tone: "green",
       },
-      { id: "policySvc", label: "Policy Service", sub: "versioned taxonomy & thresholds", col: 1, row: 2, tone: "blue" },
-      { id: "riskStore", label: "Risk Profile Store", sub: "Valkey · per-user score", col: 2, row: 2, tone: "purple" },
+      { id: "policySvc", label: "Policy Service", sub: "versioned taxonomy & thresholds", col: 3, row: 2, tone: "blue" },
+      { id: "riskStore", label: "Risk Profile Store", sub: "Valkey · per-user score", col: 4, row: 2, tone: "purple" },
       { id: "kafka", label: "Kafka", sub: "moderation events", col: 3, row: 3, tone: "orange" },
       { id: "deepClassifier", label: "Deep Classifier", sub: "async, full-context re-score", col: 4, row: 3, tone: "orange" },
       { id: "reviewQueue", label: "Review Queue + Humans", sub: "borderline confidence band", col: 5, row: 3, tone: "orange" },
@@ -61,7 +61,7 @@ export const llmSafetyModeration: Problem = {
         id: "complianceStore",
         label: "Compliance Store",
         sub: "audit log · NCMEC reporting · retention",
-        col: 3,
+        col: 5,
         row: 4,
         tone: "blue",
       },
@@ -69,7 +69,8 @@ export const llmSafetyModeration: Problem = {
     edges: [
       { from: "client", to: "gateway", label: "request", kind: "write" },
       { from: "gateway", to: "inputMod", label: "prompt + conversation context", kind: "write" },
-      { from: "inputMod", to: "riskStore", label: "per-user risk score", kind: "read" },
+      { from: "inputMod", to: "riskStore", label: "read per-user risk score", kind: "read" },
+      { from: "inputMod", to: "riskStore", label: "escalate score on block", kind: "write" },
       { from: "inputMod", to: "policySvc", label: "category thresholds", kind: "read" },
       { from: "inputMod", to: "llm", label: "allowed · ~95%", kind: "write" },
       { from: "inputMod", to: "gateway", label: "blocked · refusal", kind: "write" },
@@ -88,6 +89,25 @@ export const llmSafetyModeration: Problem = {
       { kind: "analytics", text: "async · audit, review, retraining, never blocks a response" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "inputMod", "llm", "outputMod"],
+      say: "Every request is a straight line: client to gateway to input moderation, which has to call allow-or-block in under 20ms before the LLM ever sees the prompt. Once generation starts, streamed tokens pass through output moderation before they reach the client — those two hops are the only ones on the critical path.",
+    },
+    {
+      reveal: ["policySvc", "riskStore"],
+      say: "Input moderation doesn't decide alone: it reads the category thresholds from a versioned policy service and the user's risk score from the risk store, both sub-millisecond lookups, and writes the score back up whenever it blocks something so repeat violations raise the bar next time.",
+    },
+    {
+      reveal: ["kafka", "deepClassifier"],
+      say: "Every decision, allow or block, also drops a moderation event into Kafka without waiting on it. A slower, more accurate deep classifier consumes that stream off the critical path and re-scores with full context and no latency budget.",
+    },
+    {
+      reveal: ["reviewQueue", "complianceStore"],
+      say: "Whatever the deep classifier can't confidently call goes to the human review queue. Every outcome — automated or human — lands in an append-only compliance store, the audit trail that CSAM reporting and appeals depend on.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

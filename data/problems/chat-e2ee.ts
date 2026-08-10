@@ -24,7 +24,7 @@ export const chatE2ee: Problem = {
     { label: "WebSockets", tone: "blue" },
     { label: "Consistent Hashing", tone: "green" },
     { label: "Cassandra / Wide-Column Stores", tone: "blue" },
-    { label: "Kafka / Message Queues", tone: "orange" },
+    { label: "CDN & Object Storage", tone: "blue" },
   ],
 
   // -------------------------------------------------------------------------
@@ -64,8 +64,8 @@ export const chatE2ee: Problem = {
       { id: "presence", label: "Presence Registry", sub: "user/device → gateway shard", col: 3, row: 2, tone: "green" },
       { id: "push", label: "Push Notification", sub: "APNs / FCM", mono: "silent wake, no plaintext", col: 4, row: 2, tone: "orange" },
       { id: "recipientOffline", label: "Recipient Client (offline)", col: 5, row: 2, tone: "slate" },
-      { id: "media", label: "Media Blob Store", sub: "S3 / CDN", mono: "opaque AES-encrypted bytes", col: 2, row: 3, tone: "blue" },
       { id: "groupFanout", label: "Group Fanout", sub: "sender-key distribution", col: 3, row: 3, tone: "orange" },
+      { id: "media", label: "Media Blob Store", sub: "S3 / CDN", mono: "opaque AES-encrypted bytes", col: 4, row: 3, tone: "blue" },
     ],
     edges: [
       { from: "sender", to: "keyserver", label: "fetch prekey bundle · new session only", kind: "read" },
@@ -79,8 +79,8 @@ export const chatE2ee: Problem = {
       { from: "recipientOffline", to: "mailbox", label: "reconnect → pull queued ciphertext", kind: "read" },
       { from: "sender", to: "media", label: "upload AES-encrypted attachment", kind: "write" },
       { from: "media", to: "recipientOnline", label: "fetch ciphertext blob via CDN", kind: "read" },
-      { from: "router", to: "groupFanout", label: "group send → sender-key distribution", kind: "write" },
-      { from: "groupFanout", to: "mailbox", label: "fan out per member/device", kind: "write" },
+      { from: "router", to: "groupFanout", label: "member join/rotate only → distribute new chain key", kind: "write" },
+      { from: "groupFanout", to: "mailbox", label: "one pairwise-encrypted write per member device", kind: "write" },
     ],
     legend: [
       { kind: "read", text: "read / fetch path · prekeys, presence, reconnect delivery" },
@@ -88,6 +88,29 @@ export const chatE2ee: Problem = {
       { kind: "analytics", text: "async · offline wake-up, never blocks a send" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["sender", "gateway", "router", "recipientOnline"],
+      say: "Start with the shape everyone expects: a sender's client talks to a WebSocket gateway, a router forwards the message, and if the recipient is connected right now it's delivered live. The one thing that makes this different from a normal chat app: everything the router ever touches is already ciphertext.",
+    },
+    {
+      reveal: ["keyserver"],
+      say: "But the sender can't encrypt to someone new without their public key material, and that someone might be offline. The Key Server holds pre-published X3DH bundles — identity key, signed prekey, one-time prekeys — so a session can start asynchronously, with zero live round trip to the recipient.",
+    },
+    {
+      reveal: ["presence", "mailbox", "push", "recipientOffline"],
+      say: "Not everyone is online when a message lands. Presence tells the router whether a live connection exists; if not, the Mailbox Store durably queues the ciphertext for up to 30 days and a content-free silent push wakes the recipient's device to come pull it.",
+    },
+    {
+      reveal: ["media"],
+      say: "Attachments don't fit inside a Double-Ratchet message. The client encrypts the file locally with a random AES key, uploads the opaque blob straight to object storage, and embeds only the decryption key inside the small encrypted text message.",
+    },
+    {
+      reveal: ["groupFanout"],
+      say: "Groups can't pay a pairwise-encryption cost on every one of a million messages a second. Group Fanout does the expensive pairwise work exactly once — distributing each member's sender key on join or rotation — after which every steady-state send is a single O(1) symmetric encryption the router just broadcasts like any other fan-out.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

@@ -48,14 +48,15 @@ export const robinhood: Problem = {
     edges: [
       { from: "client", to: "wsgw", label: "subscribe symbols", kind: "read" },
       { from: "feedhandler", to: "mdkafka", label: "raw ticks · ~1M/s peak", kind: "read" },
+      { from: "mdkafka", to: "wsgw", label: "live ticks · subscribed partitions", kind: "read" },
       { from: "mdkafka", to: "quotecache", label: "latest price update", kind: "read" },
-      { from: "quotecache", to: "wsgw", label: "quote read", kind: "read" },
+      { from: "quotecache", to: "wsgw", label: "snapshot on reconnect", kind: "read" },
       { from: "wsgw", to: "client", label: "delta ticks, throttled ~1/s", kind: "read" },
 
       { from: "client", to: "oms", label: "submit order (idempotency key)", kind: "write" },
       { from: "oms", to: "risk", label: "buying power check", kind: "write" },
       { from: "risk", to: "ledger", label: "reserve cash · row lock", kind: "write" },
-      { from: "oms", to: "router", label: "route order", kind: "write" },
+      { from: "ledger", to: "router", label: "reserved → route order", kind: "write" },
       { from: "router", to: "marketmaker", label: "FIX NewOrderSingle", kind: "write" },
 
       { from: "marketmaker", to: "fillsvc", label: "execution report (FIX)", kind: "analytics" },
@@ -68,6 +69,29 @@ export const robinhood: Problem = {
       { kind: "analytics", text: "async · execution reports, settlement, never blocks an order ack" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "oms", "ledger"],
+      say: "Start with the order skeleton: client submits, the Order Service validates, and every buying-power check reads and writes the ledger directly — no cache ever sits in this loop, because a stale balance is a double-spend waiting to happen.",
+    },
+    {
+      reveal: ["risk", "router", "marketmaker"],
+      say: "Add the gate and the exit door: Risk reserves cash inside the same ACID transaction as the ledger, and only after that reservation commits does the Smart Order Router speak FIX to a market maker — nothing routes on an unreserved order.",
+    },
+    {
+      reveal: ["fillsvc"],
+      say: "Close the loop: execution reports stream back from the market maker into a Fill & Clearing service that settles cash and position into that same ledger, asynchronously, without ever blocking the order ack.",
+    },
+    {
+      reveal: ["feedhandler", "mdkafka"],
+      say: "Now the other half of the app entirely: a feed handler ingests roughly a million exchange ticks a second and publishes them onto a Kafka bus partitioned by symbol, so each symbol stays ordered while the fan-out scales horizontally.",
+    },
+    {
+      reveal: ["wsgw", "quotecache"],
+      say: "A WebSocket gateway subscribes straight to the partitions its connected clients hold for the live stream, falls back to a Redis snapshot only when a client (re)connects, and throttles every symbol to about one update a second before it ever reaches a phone.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -312,8 +336,8 @@ export const robinhood: Problem = {
           "Exchange ticks land on a symbol-partitioned bus, get cached as the latest snapshot, and the WebSocket gateway throttles the fan-out so no client (or its battery) drowns.",
         steps: [
           { label: "Feed Handler", note: "SIP + direct exchange feeds" },
-          { label: "Market Data Bus (Kafka)", note: "symbol-partitioned, ordered per symbol" },
-          { label: "Quote Cache (Redis)", note: "latest tick per symbol" },
+          { label: "Market Data Bus (Kafka)", note: "symbol-partitioned; gateway pods subscribe directly to the relevant partitions" },
+          { label: "Quote Cache (Redis)", note: "latest snapshot, read only by a pod on a client's (re)connect" },
           { label: "WebSocket Gateway", note: "throttled ~1 update/s/symbol/client" },
           { label: "Client", note: "delta-only payload, subscribed symbols only" },
         ],
@@ -421,8 +445,8 @@ export const robinhood: Problem = {
       goal: "One diagram, three lanes: market-data read path, order write path, and async execution/settlement — each with its own consistency story.",
       why: "Drawing these as three separate lanes proves the candidate understands they have different SLAs and different correctness requirements, not just different code paths.",
       steps: [
-        { kind: "DRAW", text: 'Lay down the **read/market-data lane**: Feed Handler → Kafka (symbol-partitioned) → Redis quote cache → WebSocket Gateway → Client. Label arrows **"~1M ticks/s"**, **"throttled ~1/s per symbol"**.' },
-        { kind: "DRAW", text: 'Add the **write/order lane**: Client → OMS → Risk/Buying-Power → Ledger DB → Smart Order Router → Market Maker. Label **"2K/s sustained · ACID reserve-then-fill"**, **"FIX NewOrderSingle"**.' },
+        { kind: "DRAW", text: 'Lay down the **read/market-data lane**: Feed Handler → Kafka (symbol-partitioned). From Kafka, two paths converge on the client: the WebSocket Gateway subscribes directly to the partitions its connected clients hold for the live stream, and a Redis quote cache serves only the snapshot on (re)connect. Both land on WebSocket Gateway → Client. Label arrows **"~1M ticks/s"**, **"throttled ~1/s per symbol"**.' },
+        { kind: "DRAW", text: 'Add the **write/order lane**: Client → OMS → Risk/Buying-Power → Ledger DB → Smart Order Router → Market Maker. Label **"2K/s sustained · ACID reserve-then-fill"**, **"FIX NewOrderSingle, only after the reservation commits"**.' },
         { kind: "DRAW", text: 'Add the **async lane**: Market Maker → Fill & Clearing Service → Ledger (settle) and → WebSocket Gateway (push order-status). Label **"execution reports, partial fills"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they have three different correctness stories — market data is eventually consistent and cache-first, orders are strongly consistent and ACID, and settlement is async but still exactly-once via the idempotency key."' },
       ],
@@ -594,7 +618,7 @@ export const robinhood: Problem = {
       {
         heading: "Market data: firehose to trickle",
         body: [
-          "The feed handler normalizes exchange messages (from the SIP consolidated tape and/or direct exchange feeds) and publishes onto Kafka partitioned by symbol, preserving per-symbol ordering while scaling horizontally. A Redis quote cache holds the latest tick per symbol for fast reads and fresh-connection snapshots.",
+          "The feed handler normalizes exchange messages (from the SIP consolidated tape and/or direct exchange feeds) and publishes onto Kafka partitioned by symbol, preserving per-symbol ordering while scaling horizontally. WebSocket gateway pods are themselves Kafka consumers, subscribing only to the partitions their connected clients actually hold, so the live stream never has to detour through a cache. A Redis quote cache holds the latest tick per symbol purely for fresh-connection snapshots — a client reads the current value once on (re)connect, then subscribes forward.",
           "The unlock is throttling at the WebSocket gateway: even if a symbol ticks 50 times a second, a client gets at most about one update a second, and only the fields that changed. That single design choice is what makes fanning out to millions of sockets tractable — it caps outbound load per connection independent of how volatile the underlying symbol gets.",
         ],
       },

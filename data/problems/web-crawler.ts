@@ -37,19 +37,19 @@ export const webCrawler: Problem = {
         label: "URL Frontier",
         sub: "priority front queues",
         mono: "1 back queue per host (Mercator)",
-        col: 2,
-        row: 1,
+        col: 1,
+        row: 2,
         tone: "purple",
       },
       { id: "hostqueue", label: "Host Router", sub: "consistent hashing → worker", col: 2, row: 2, tone: "purple" },
       { id: "politeness", label: "Politeness Throttle", sub: "token bucket, min-delay/host", col: 3, row: 2, tone: "purple" },
-      { id: "fetcher", label: "Fetcher Pool", sub: "async workers · cached DNS + robots.txt", col: 3, row: 1, tone: "green" },
-      { id: "parser", label: "Parser / Extractor", sub: "HTML → links + text", col: 4, row: 1, tone: "green" },
-      { id: "seenurl", label: "Seen-URL Filter", sub: "Bloom filter, ~100B entries", col: 5, row: 1, tone: "orange" },
-      { id: "contentstore", label: "Content Store", sub: "S3 / HDFS, immutable blobs", col: 4, row: 2, tone: "slate" },
-      { id: "simhash", label: "Near-Dup Filter", sub: "SimHash, Hamming ≤3", col: 5, row: 2, tone: "orange" },
+      { id: "fetcher", label: "Fetcher Pool", sub: "async workers · cached DNS + robots.txt", col: 4, row: 2, tone: "green" },
+      { id: "parser", label: "Parser / Extractor", sub: "HTML → links + text", col: 5, row: 2, tone: "green" },
+      { id: "seenurl", label: "Seen-URL Filter", sub: "Bloom filter, ~100B entries", col: 5, row: 3, tone: "orange" },
       { id: "kafka", label: "New-URL Queue", sub: "Kafka", col: 2, row: 3, tone: "orange" },
-      { id: "index", label: "Indexing Pipeline", sub: "downstream search index", col: 4, row: 3, tone: "orange" },
+      { id: "contentstore", label: "Content Store", sub: "S3 / HDFS, immutable blobs", col: 3, row: 4, tone: "slate" },
+      { id: "simhash", label: "Near-Dup Filter", sub: "SimHash, Hamming ≤3", col: 4, row: 4, tone: "orange" },
+      { id: "index", label: "Indexing Pipeline", sub: "downstream search index", col: 5, row: 4, tone: "orange" },
     ],
     edges: [
       { from: "seeds", to: "frontier", label: "seed load", kind: "write" },
@@ -70,6 +70,25 @@ export const webCrawler: Problem = {
       { kind: "analytics", text: "content pipeline · dedup + indexing, off the fetch path" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["seeds", "frontier", "fetcher", "parser"],
+      say: "The naive loop: seed URLs load into a frontier, a worker pulls one out and fetches it, the parser pulls out links and text. This works until it's spread across a fleet — nothing here stops ten workers from hammering the same host at once.",
+    },
+    {
+      reveal: ["hostqueue", "politeness"],
+      say: "Fix that before anything else: consistent-hash each host to exactly one worker, so that worker's own token bucket enforces the min-delay in memory. Politeness becomes a local decision, not a call to a shared rate limiter on every one of 10,000 fetches a second.",
+    },
+    {
+      reveal: ["seenurl", "kafka"],
+      say: "Most links a page yields are already seen. A sharded Bloom filter rejects ~90%+ of them for free with zero false negatives; the survivors buffer in Kafka and re-enter the frontier with a computed priority, so a burst of discovered links never stalls the fetch loop.",
+    },
+    {
+      reveal: ["contentstore", "simhash", "index"],
+      say: "Raw content lands in blob storage and gets checked for near-duplicates via SimHash before it ever reaches the index — fully async, off the fetch path, so a slow indexing stage can never add latency to a fetch.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -94,7 +113,7 @@ export const webCrawler: Problem = {
       { id: "NFR-05", text: "Crawl pipeline availability", tag: "99.9%" },
       { id: "NFR-06", text: "Storage footprint for compressed raw HTML at 10B pages", tag: "~1PB" },
       { id: "NFR-07", text: "Exact-URL dedup correctness: false positives acceptable, false negatives are not", tag: "zero false negatives" },
-      { id: "NFR-08", text: "Crawler-trap containment cap on URLs crawled per host per day", tag: "bounded/host/day" },
+      { id: "NFR-08", text: "Crawler-trap containment cap on URLs crawled per host per day", tag: "≤50K/host/day" },
     ],
   },
 
@@ -212,7 +231,7 @@ export const webCrawler: Problem = {
       bullets: [
         { lead: "SimHash", text: "a 64-bit fingerprint over content shingles such that near-duplicate documents differ by only a few bits (Hamming distance ≤3)." },
         { lead: "LSH banding", text: "splits the fingerprint into bands so only documents sharing a band get compared, avoiding an O(n²) scan across billions of pages." },
-        { lead: "Crawler traps", text: "infinite calendar pages, auto-generated URLs, session-id loops — contained with a per-host-per-day URL cap, a crawl-depth cap, and canonicalization that strips session/tracking parameters before a URL ever reaches the frontier." },
+        { lead: "Crawler traps", text: "infinite calendar pages, auto-generated URLs, session-id loops — contained with a hard cap of ≤50K URLs crawled per host per day, a crawl-depth cap, and canonicalization that strips session/tracking parameters before a URL ever reaches the frontier." },
       ],
       pictureTitle: "Catching what URL dedup misses",
       pictureRows: [
@@ -226,7 +245,7 @@ export const webCrawler: Problem = {
         why: "URL-level dedup only catches byte-identical URLs; content-level near-dup and trap containment need separate mechanisms.",
         tradeoff: "SimHash comparisons and canonicalization add CPU per page in exchange for a much smaller, cleaner index.",
         failure: "Without a per-host cap, a single calendar or session-id trap can consume the entire crawl budget on one worthless host.",
-        mitigation: "Hard-cap URLs crawled per host per day and crawl depth, and canonicalize away known tracking/session parameters before frontier insertion.",
+        mitigation: "Hard-cap at ≤50K URLs crawled per host per day plus a crawl-depth cap, and canonicalize away known tracking/session parameters before frontier insertion.",
       },
     },
     {
@@ -342,7 +361,7 @@ export const webCrawler: Problem = {
           "Seen-URL Bloom filter: ~100B entries, 1% FP ≈ ~120GB, sharded",
           "SimHash: 64-bit fingerprint, near-dup at Hamming distance ≤3",
           "Politeness default: 1-2s between requests to the same host, capped concurrent connections/host",
-          "Crawler trap cap: bounded URLs crawled per host per day",
+          "Crawler trap cap: ≤50K URLs crawled per host per day, plus a crawl-depth cap",
         ],
       },
       {
@@ -441,7 +460,7 @@ export const webCrawler: Problem = {
       steps: [
         { kind: "SAY", text: '"Exact dedup: a sharded Bloom filter over ~100B seen URLs, sized for ~1% false-positive rate, about 120GB total, with zero false negatives."' },
         { kind: "SAY", text: '"Near-dup: SimHash gives a 64-bit fingerprint per page; documents within Hamming distance 3 are treated as duplicates, compared via LSH banding, not brute force."' },
-        { kind: "SAY", text: '"Crawler traps get an explicit containment plan: cap URLs crawled per host per day, cap crawl depth, canonicalize away session/tracking params before a URL ever reaches the frontier."' },
+        { kind: "SAY", text: '"Crawler traps get an explicit containment plan: cap at ≤50K URLs crawled per host per day, cap crawl depth, canonicalize away session/tracking params before a URL ever reaches the frontier."' },
         { kind: "RULE OUT", text: '"A DB lookup per discovered link, or an exact in-memory hash set at this cardinality — both too expensive at 100B+ links/day." Cross both off.' },
       ],
       grading: "Bloom filter sizing math on the board, SimHash explained as content-level (not URL-level) dedup, and a quantified trap-containment cap.",
@@ -549,7 +568,7 @@ export const webCrawler: Problem = {
       },
       {
         q: "How would you detect and handle a crawler trap in practice?",
-        a: "Cap URLs crawled per host per day and cap crawl depth as hard limits, then monitor per-host discovered-URL growth: if a host's URL count grows superlinearly relative to unique content (near-identical SimHash fingerprints across thousands of 'different' URLs), flag it and throttle or quarantine that host rather than continuing to feed it fetch budget.",
+        a: "Cap at ≤50K URLs crawled per host per day and cap crawl depth as hard limits, then monitor per-host discovered-URL growth: if a host's URL count grows superlinearly relative to unique content (near-identical SimHash fingerprints across thousands of 'different' URLs), flag it and throttle or quarantine that host rather than continuing to feed it fetch budget.",
       },
       {
         q: "How do you prioritize which pages to crawl first?",

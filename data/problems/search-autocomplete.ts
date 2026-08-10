@@ -90,6 +90,33 @@ export const searchAutocomplete: Problem = {
     ],
   },
 
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "acsvc"],
+      say: "Skeleton first: a client, a regional gateway, and a stateless Autocomplete Service. Every request is a prefix in, top-10 out — nothing here holds state yet.",
+    },
+    {
+      reveal: ["trieshard"],
+      say: "The Autocomplete Service hashes the prefix to pick one of ~500 trie shards, each an in-memory store of top-10 suggestions already precomputed offline. A read is a lookup, never a live search.",
+    },
+    {
+      reveal: ["trendcache"],
+      say: "Historical popularity alone is stale by up to a day, so every request also asks a Valkey trending cache holding decayed scores, and the service blends the two before responding.",
+    },
+    {
+      reveal: ["searchsvc", "kafka"],
+      say: "The real write signal isn't a keystroke, it's a submitted search or a clicked suggestion. The Search Service logs it once and drops it on Kafka — that's the only thing every downstream pipeline reads from.",
+    },
+    {
+      reveal: ["flink"],
+      say: "Flink consumes that same Kafka stream in 1-minute decayed windows and writes straight into the trending cache, so a spiking query can reach the top-10 in under a minute.",
+    },
+    {
+      reveal: ["s3", "spark", "triebuild"],
+      say: "In parallel, Kafka archives every event to the Query Log Archive. Once a day, Spark rebuilds the whole trie from that archive, a builder merges top-10 bottom-up, and the new snapshot swaps into the shard cluster.",
+    },
+  ],
+
   // -------------------------------------------------------------------------
   requirements: {
     functional: [
@@ -112,7 +139,7 @@ export const searchAutocomplete: Problem = {
       { id: "NFR-04", text: "Trending-signal freshness, click to surfaced suggestion", tag: "< 1 min" },
       { id: "NFR-05", text: "Full historical index rebuild cadence", tag: "daily" },
       { id: "NFR-06", text: "Availability (about 52 min downtime per year)", tag: "99.99%" },
-      { id: "NFR-07", text: "Distinct historical queries indexed", tag: "1B" },
+      { id: "NFR-07", text: "Distinct historical queries logged (corpus size, pre-filter)", tag: "1B" },
       { id: "NFR-08", text: "Autocomplete requests to submitted-search ratio", tag: "20:1" },
       { id: "NFR-09", text: "Suggestions returned per request", tag: "top 10" },
     ],

@@ -64,6 +64,25 @@ export const aiModelRollout: Problem = {
     ],
   },
 
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "champion"],
+      say: "Strip away every rollout concept and this is a normal serving path: a stateless gateway forwards each request to whichever model version is currently live, the champion. At 200K req/s, this pool alone has to clear sub-50ms p99 before we add a single rollout mechanic.",
+    },
+    {
+      reveal: ["featurestore"],
+      say: "The model can't score anything without features, so every pool reads from one online feature store — Feast, p99 under 10ms — and that's the same store training reads from offline, which is the first defense against training-serving skew.",
+    },
+    {
+      reveal: ["registry", "controller", "router", "challenger"],
+      say: "Now the actual rollout: a new version lands in the Model Registry, the Rollout Controller walks it up the 1%→5%→25%→50%→100% ladder, and the Traffic Router turns that into routing config the gateway applies — a slice of live traffic peels off to a separate Challenger pool while everything else stays on champion.",
+    },
+    {
+      reveal: ["kafka", "flink", "canary"],
+      say: "Every prediction gets logged to Kafka without blocking the response. Flink computes drift and joins in delayed outcomes, and a sequential-testing Canary Analysis Engine watches continuously and writes its verdict straight back into the Rollout Controller — that feedback edge is what makes this a closed loop instead of a one-way pipeline with a dashboard bolted on.",
+    },
+  ],
+
   // -------------------------------------------------------------------------
   requirements: {
     functional: [
@@ -98,11 +117,11 @@ export const aiModelRollout: Problem = {
       title: "Sizing the rollout ladder: why 1% before anything else",
       body: [
         "The instinct is to pick a rollout percentage that 'feels safe'. The right way to pick it is statistical power: at 200K req/s, 1% of traffic is still ~2,000 req/s, which is plenty to catch a latency spike or an error-rate jump within seconds. But a subtle 2% drop in click-through rate needs a much bigger sample — even at 1% traffic that can take hours to reach significance, because the signal is small relative to normal day-to-day noise.",
-        "So the ladder isn't arbitrary. 1% → 5% → 25% → 50% → 100% roughly 5x's the blast radius at each step while roughly 4-5x-ing the sample size, and each stage's bake time should be tied to how long the noisiest guardrail metric you're watching needs to reach significance — not to a fixed clock everyone forgot to justify.",
+        "So the ladder isn't arbitrary. 1% → 5% → 25% → 50% → 100% takes 5x multiplicative jumps early (1→5→25) while the absolute blast radius is still tiny, then tapers to safer 2x doublings (25→50→100) once real users are on the line — and each stage's bake time should be tied to how long the noisiest guardrail metric you're watching needs to reach significance, not to a fixed clock everyone forgot to justify.",
       ],
       bullets: [
         { lead: "1% floor", text: "at 200K req/s that's ~2K/s — enough for latency and error-rate guardrails to reach significance in under a minute, even though a subtle CTR regression at the same 1% needs hours." },
-        { lead: "5x stage jumps", text: "1-5-25-50-100 keeps the blast radius bounded at each step while quadrupling-plus the sample size, the standard shape for progressive delivery." },
+        { lead: "Tapering stage jumps", text: "1-5-25-50-100 takes 5x jumps early when absolute blast radius is still small, then tapers to 2x doublings (25→50→100) as the stakes rise — the standard shape for progressive delivery." },
         { lead: "Bake time isn't fixed", text: "tie the stage transition to time-to-significance for the noisiest metric being watched, not to a clock everyone forgot to justify." },
         { lead: "Blast radius math", text: "at 200K/s, a bad model sitting at 25% for 5 minutes touches ~15M requests — that number is why fast detection matters more than a cautious first step." },
       ],
@@ -184,7 +203,7 @@ export const aiModelRollout: Problem = {
         "A model's true accuracy needs a label, and labels lag: a click arrives in seconds, a confirmed fraud case in days, a loan default in months. You can't hold the canary decision hostage to a label that hasn't shown up yet, so real-time guardrails run on proxy signals (drift, latency, error rate) while a separate slower pipeline joins predictions to outcomes as they trickle in.",
       ],
       bullets: [
-        { lead: "Prediction log as the join key", text: "every inference is logged with a unique request id, the features used, and the model version, with a retention TTL sized to the longest label lag that model needs." },
+        { lead: "Prediction log as the join key", text: "every inference is logged with a unique request id, the features used, and the model version, with a retention TTL sized to the longest label lag that model needs; mirrored into an OLAP store (ClickHouse) it doubles as the audit trail, while live guardrail metrics stream to Prometheus for dashboards." },
         { lead: "Watermarked streaming join", text: "Flink joins outcome events to predictions by request id with a bounded watermark (e.g. 24h); state past the watermark is capped so the join doesn't grow unbounded." },
         { lead: "Cold join for long-tail labels", text: "labels that take weeks or months (loan default, chargeback) skip the streaming join entirely and get reconciled nightly in a batch warehouse job instead." },
         { lead: "Proxy signals bridge the gap", text: "prediction and feature distribution drift are available within minutes and are the leading indicator that something's wrong, well before a true labeled-accuracy number exists." },

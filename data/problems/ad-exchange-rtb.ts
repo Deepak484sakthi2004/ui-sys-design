@@ -70,7 +70,7 @@ export const adExchangeRtb: Problem = {
         tone: "orange",
       },
       { id: "pacer", label: "Budget Pacer", sub: "token bucket per campaign", col: 4, row: 2, tone: "purple" },
-      { id: "adserver", label: "Winning Creative", sub: "markup / VAST tag", col: 2, row: 3, tone: "green" },
+      { id: "adserver", label: "Winning Creative", sub: "markup / VAST tag", col: 1, row: 3, tone: "green" },
       { id: "kafka", label: "Kafka", sub: "win + impression + click events", col: 3, row: 3, tone: "orange" },
       { id: "flink", label: "Flink", sub: "real-time spend aggregation", col: 4, row: 3, tone: "orange" },
       { id: "billing", label: "Billing Warehouse", sub: "ClickHouse · zero loss", col: 5, row: 3, tone: "orange" },
@@ -95,6 +95,29 @@ export const adExchangeRtb: Problem = {
       { kind: "analytics", text: "async billing & pacing feedback, never blocks the auction" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["publisher", "gateway", "fanout", "dsps", "auction"],
+      say: "A bid request arrives carrying a hard tmax deadline. The gateway fans it out in parallel to a filtered set of DSPs and closes the auction with whatever bids land inside that window — a late bid gets zero weight, never a slow win.",
+    },
+    {
+      reveal: ["adserver"],
+      say: "The winning bid becomes ad markup and renders back to the publisher. That closes the whole synchronous loop, and it has to fit inside about 100ms end to end.",
+    },
+    {
+      reveal: ["profile"],
+      say: "Before fanout, the gateway enriches the request with a sub-millisecond Aerospike lookup — cookie or device ID to audience segments — so every DSP bids with targeting data already attached.",
+    },
+    {
+      reveal: ["pacer"],
+      say: "A winning bid reserves a token from that campaign's budget pacer — a token bucket that tapers participation as spend nears the daily target instead of hard-cutting off at 100%.",
+    },
+    {
+      reveal: ["kafka", "flink", "billing"],
+      say: "Win and impression events drop into Kafka asynchronously with acknowledged delivery, never dropped, because this is money. Flink aggregates spend into the billing warehouse and feeds the pacer a fresh number every minute.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

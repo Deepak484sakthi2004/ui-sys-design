@@ -116,6 +116,29 @@ export const ragPlatform: Problem = {
     ],
   },
 
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "orchestrator", "llm"],
+      say: "Start with the shape of any request/response service: the client asks through a gateway, a stateless orchestrator coordinates the request, and an LLM generates the answer. Right now that's just a chatbot — every other box on this board exists to force this LLM to answer from real documents instead of guessing.",
+    },
+    {
+      reveal: ["hybrid", "vectordb", "bm25"],
+      say: "Grounding means retrieving before generating. The orchestrator fans out to a hybrid retriever that queries a sharded HNSW vector index for dense, semantic matches and an OpenSearch BM25 index for exact-term matches in parallel — dense catches paraphrase, BM25 catches the error codes and part numbers dense embeddings blur.",
+    },
+    {
+      reveal: ["reranker"],
+      say: "Two top-200 candidate lists are too wide, and too cheaply scored, to hand straight to an LLM. A cross-encoder reranker scores all 200 with full cross-attention and narrows to the top-8 chunks that actually fit the context budget.",
+    },
+    {
+      reveal: ["cache"],
+      say: "Most queries are near-duplicates of something asked minutes ago, so a semantic cache sits in front of the whole retrieval-and-generation pipeline and short-circuits about 30% of traffic straight back to the client, skipping retrieval and generation entirely.",
+    },
+    {
+      reveal: ["ingest", "reembed"],
+      say: "Off the query path entirely: a Kafka-driven ingestion pipeline chunks, embeds, and upserts new or changed documents within minutes, while a separate reindex job handles the rare, dangerous case — an embedding-model upgrade — by building a full shadow index before any cutover.",
+    },
+  ],
+
   // -------------------------------------------------------------------------
   requirements: {
     functional: [
@@ -271,6 +294,7 @@ export const ragPlatform: Problem = {
         { lead: "Cross-encoder (rerank)", text: "query+chunk encoded jointly with full attention; far more accurate at judging true relevance, but O(candidates) full forward passes, so it only runs on the narrowed set." },
         { lead: "MMR (Maximal Marginal Relevance)", text: "after reranking, dedupe near-identical chunks (e.g., three chunks from the same paragraph) so the 8 slots cover distinct information instead of redundant restatements." },
         { lead: "Context budget math", text: "8K tokens − prompt scaffolding − chat history leaves room for roughly 8 chunks at ~512 tokens each; this number, not a preference, is what caps the funnel at top-8." },
+        { lead: "The funnel is also a cost lever", text: "generation tokens dominate the < $3/1K-query ceiling — an 8K-token context on a small/fast model runs roughly $1.20-1.50 per 1K queries, batched cross-encoder rerank another $0.30-0.50, query embedding under $0.02. A frontier-tier generation model on the same 8K context blows the ceiling even with a perfect funnel, so model-tier choice is as much a cost decision as a quality one." },
       ],
       pictureTitle: "The retrieval funnel",
       pictureRows: [
@@ -412,6 +436,7 @@ export const ragPlatform: Problem = {
           "Retrieval funnel: hybrid top-200 → cross-encoder rerank → top-8 into context",
           "Context budget: ~8K tokens, so ~8 chunks of ~512 tokens plus prompt + history",
           "Recall@50 target > 95% against a labeled eval set",
+          "Cost ceiling < $3/1K queries: ~$1.2-1.5 LLM generation + ~$0.3-0.5 rerank + <$0.02 query embedding",
         ],
       },
       {
@@ -436,6 +461,7 @@ export const ragPlatform: Problem = {
           "Chunking is a retrieval-quality lever, not a formatting detail — boundary cuts silently kill recall",
           "Cite chunk IDs in every answer and log rerank scores so grounding is auditable, not just plausible",
           "Freshness (minutes, incremental) and migration (hours-days, full rebuild) are two different pipelines",
+          "The < $3/1K-query cost ceiling is an LLM-tier decision, not just a retrieval one — generation tokens dominate the bill",
         ],
       },
     ],
@@ -621,6 +647,10 @@ export const ragPlatform: Problem = {
       {
         q: "What's the failure mode if the semantic cache serves a stale answer?",
         a: "The cache should key on the embedded query plus the current embedding-model/index version, so a reindex or migration naturally invalidates it. For fast-changing sources, cap the cache TTL well under the freshness SLA (well under 5 minutes) so a stale answer self-heals quickly, and treat the cache as an optimization, never a source of truth — a cache miss must always fall through to live retrieval, not to a default answer.",
+      },
+      {
+        q: "How do you actually hit the < $3/1K-query cost ceiling?",
+        a: "Break the query down into its three billed components: query embedding is negligible, a few cents per 1K queries, since only the query itself is embedded live and the corpus is embedded once up front. Batched cross-encoder rerank over the narrowed top-200 runs roughly $0.30-0.50 per 1K queries on GPU. Generation dominates: an 8K-token context plus a few hundred output tokens on a small/fast model lands around $1.20-1.50 per 1K queries, leaving headroom under $3 — but the same 8K context on a frontier-tier model can blow past the ceiling on its own. So the funnel (narrow context) and the model-tier choice are both cost levers, not just latency and quality ones.",
       },
       {
         q: "Why RRF for fusion instead of training a learned fusion model?",

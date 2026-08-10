@@ -59,7 +59,7 @@ export const youtubeTopK: Problem = {
         row: 3,
         tone: "green",
       },
-      { id: "kafka", label: "Kafka", sub: "view-events · 512 partitions", col: 3, row: 3, tone: "orange" },
+      { id: "kafka", label: "Kafka", sub: "view-events · 256 partitions", col: 3, row: 3, tone: "orange" },
       {
         id: "flink",
         label: "Flink",
@@ -100,6 +100,25 @@ export const youtubeTopK: Problem = {
       { kind: "analytics", text: "analytics · async, never blocks a view event or a read" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "ingest_api", "kafka"],
+      say: "Start with the write skeleton: a client's view event hits a stateless Ingest API, gets validated and deduped, then durably lands in Kafka. That's the entire synchronous write path — up to 300K/s — and nothing downstream of Kafka can ever block it.",
+    },
+    {
+      reveal: ["cdn", "trending_api", "valkey"],
+      say: "Reads go the other direction: a trending-page request hits the CDN first, falls through to a stateless Trending API on a miss, which does one ZREVRANGE against a precomputed Valkey ZSET. No aggregation ever happens on a read.",
+    },
+    {
+      reveal: ["flink", "merger"],
+      say: "Kafka fans out to Flink, which keeps a fixed-size Count-Min Sketch and heavy-hitters candidate list per shard per 1-minute bucket. A Merge Job unions every shard's over-fetched candidates into one correct global ranking every ~30s and writes it straight into that same Valkey ZSET.",
+    },
+    {
+      reveal: ["lake", "spark"],
+      say: "Kafka also sinks raw events into an S3 data lake. Every completed hour, a Spark batch job recomputes exact counts from that archive and overwrites the approximate leaderboard in Valkey — freshness from the speed layer, correctness from the batch layer.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -299,7 +318,7 @@ export const youtubeTopK: Problem = {
       ],
       bullets: [
         { lead: "Partition by video_id", text: "keeps one video's full count in one partition — but a viral video means one partition (and one Flink task) absorbs a disproportionate share of the 300K/sec peak, recreating the exact hot-key problem sharding was supposed to solve." },
-        { lead: "Partition randomly (by event_id)", text: "spreads every video's events evenly across all 512 partitions regardless of popularity, so no single shard is ever the bottleneck — but now no single shard has the true count for anything, which is exactly why the merge-across-shards design (Teardown 2) exists." },
+        { lead: "Partition randomly (by event_id)", text: "spreads every video's events evenly across all 256 partitions regardless of popularity, so no single shard is ever the bottleneck — but now no single shard has the true count for anything, which is exactly why the merge-across-shards design (Teardown 2) exists." },
         { lead: "The two choices are coupled", text: "random partitioning is only viable because the merge job is designed to handle it; if you partitioned by video_id you wouldn't need the over-fetch-and-merge trick at all, but you'd be back to unbounded per-partition hot-key risk. Say this connection explicitly — it shows the two decisions were made together." },
       ],
       pictureTitle: "Partition key: trade hot-key risk for merge complexity",
@@ -312,7 +331,7 @@ export const youtubeTopK: Problem = {
         solution: "Partition randomly by event_id, not by video_id, and rely on the merge-based top-K design to reassemble per-video totals.",
         why: "Video popularity is Zipfian — partitioning by video_id turns 'this video went viral' directly into 'this one partition is overloaded.'",
         tradeoff: "Random partitioning means no single shard ever has an exact count for any video, which is exactly why the sketch + merge machinery from Teardown 2 has to exist.",
-        failure: "Partitioning by video_id looks simpler until the first viral moment saturates one Flink task while the other 511 sit idle.",
+        failure: "Partitioning by video_id looks simpler until the first viral moment saturates one Flink task while the other 255 sit idle.",
         mitigation: "Partition randomly, size the merge job's over-fetch factor for the real traffic skew, and monitor per-partition load to confirm it stays flat under a viral spike.",
       },
     },
@@ -349,7 +368,7 @@ export const youtubeTopK: Problem = {
         steps: [
           { label: "Client", note: "emits a view event" },
           { label: "Ingest API", note: "Bloom-filter cooldown, per (user, video)" },
-          { label: "Kafka", note: "512 partitions, keyed randomly by event_id" },
+          { label: "Kafka", note: "256 partitions, keyed randomly by event_id" },
         ],
       },
       {

@@ -56,15 +56,17 @@ export const distributedCache: Problem = {
       { from: "hashring", to: "shardA", label: "hash(key)", kind: "read" },
       { from: "hashring", to: "shardB", label: "hash(key)", kind: "read" },
       { from: "hashring", to: "shardC", label: "hash(key)", kind: "read" },
-      { from: "shardA", to: "db", label: "miss → cache-aside fetch", kind: "read" },
+      { from: "hashring", to: "replicaA", label: "read replica · load-share", kind: "read" },
+      { from: "shardA", to: "db", label: "full miss → cache-aside fetch", kind: "read" },
       { from: "client", to: "hashring", label: "SET / DELETE", kind: "write" },
-      { from: "hashring", to: "shardA", label: "route to primary", kind: "write" },
-      { from: "shardA", to: "db", label: "delete-on-write invalidation", kind: "write" },
+      { from: "hashring", to: "shardA", label: "route DELETE to primary", kind: "write" },
+      { from: "client", to: "db", label: "write of record, before cache delete", kind: "write" },
       { from: "shardA", to: "replicaA", label: "async replicate", kind: "analytics" },
-      { from: "etcd", to: "hashring", label: "cluster map push", kind: "analytics" },
-      { from: "etcd", to: "shardB", label: "gossip heartbeat / failover", kind: "analytics" },
       { from: "shardB", to: "replicaB", label: "async replicate", kind: "analytics" },
       { from: "shardC", to: "replicaC", label: "async replicate", kind: "analytics" },
+      { from: "shardB", to: "shardC", label: "gossip liveness", kind: "analytics" },
+      { from: "etcd", to: "replicaB", label: "promote on quorum failure", kind: "analytics" },
+      { from: "etcd", to: "hashring", label: "cluster map push", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · 5M gets/sec" },
@@ -72,6 +74,29 @@ export const distributedCache: Problem = {
       { kind: "analytics", text: "background · replication, gossip, rebalancing" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "hashring", "shardA"],
+      say: "Start with the simplest possible shape: hash a key, route it to the shard that owns it, get an answer back. Every other box in this design exists to make that one hop fast, safe, and honest.",
+    },
+    {
+      reveal: ["shardB", "shardC", "db"],
+      say: "5TB doesn't fit on one node, so the keyspace splits across shards via the hash ring — three shown here, about a hundred in production — with a database of record behind them that the cache is never allowed to replace.",
+    },
+    {
+      reveal: ["localcache"],
+      say: "Before any network hop at all, an in-process cache with a 1-5s TTL lives inside the app service itself. It's the cheapest possible hit, and the first line of defense the moment one key goes hot.",
+    },
+    {
+      reveal: ["replicaA", "replicaB", "replicaC"],
+      say: "Every shard gets an async replica for failover and read scaling. The primary acks a write locally and streams it to the replica after, so replication never adds a millisecond to the write path.",
+    },
+    {
+      reveal: ["etcd"],
+      say: "One Raft-backed coordinator owns the cluster map and is the only thing allowed to promote a replica to primary — that single source of truth is what keeps a resize or a failover from ever splitting brain.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -140,7 +165,7 @@ export const distributedCache: Problem = {
       bullets: [
         { lead: "mod-N hashing", text: "one node added and ~99% of keys map to a new shard. Rejected outright for anything you plan to resize." },
         { lead: "Plain consistent hashing", text: "place each node at one random point on a hash ring; a key belongs to the next node clockwise. Removing one node only moves that node's keys, ~1/N of the keyspace, but with only 100 random points some arcs are 3x the average size, so load is uneven." },
-        { lead: "Virtual nodes (the fix)", text: "give each physical node ~200 points on the ring, 20,000 total. The law of large numbers smooths the arc sizes, so every physical node ends up with close to its fair 1/N share, and losing one node spreads its ~1% of keys across dozens of survivors instead of dumping it all on one neighbor." },
+        { lead: "Virtual nodes (the fix)", text: "give each of the ~100 shard-owning nodes ~200 points on the ring, 20,000 total; replicas aren't separate ring entries, they're just the next distinct physical nodes walking clockwise from each point. The law of large numbers smooths the arc sizes, so every shard ends up with close to its fair 1/N share, and losing one node spreads its ~1% of keys across dozens of survivors instead of dumping it all on one neighbor." },
         { lead: "Client-side ring", text: "the hash ring lives in a client library, not a central proxy, so routing is one hash lookup with no extra network hop; the ring stays in sync via the coordinator's cluster map." },
       ],
       pictureTitle: "Data movement on a single node change",
@@ -355,7 +380,7 @@ export const distributedCache: Problem = {
           "~100 primary shards (50GB usable/node, 80% cap), x2 replication ≈ 200 nodes",
           "5M reads/sec, 200K writes/sec ≈ 25:1 read:write",
           "~50K reads/sec per shard, well under a single node's ~100K-1M ops/sec ceiling",
-          "200 virtual nodes per physical node ≈ 20K ring points",
+          "200 virtual points per shard-owning node (100 shards) ≈ 20K ring points",
           "p99 GET < 1ms, p99 SET < 2ms, hit rate ≥ 95%",
           "Failure detection plus promotion target: < 10s",
         ],

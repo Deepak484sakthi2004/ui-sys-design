@@ -7,7 +7,7 @@ export const newsFeed: Problem = {
   level: "Hard",
   deepDiveAvailable: true,
   intro: [
-    "Design a news feed / timeline like Twitter/X, Instagram, or Facebook: 500M daily active users compose and consume posts, publishing about 300M posts/day (roughly 3.5K writes/sec on average, bursting past 10K/sec during live events), while the home timeline is read about 150 times more often than it's written, roughly 300K reads/sec globally, and a freshly published post needs to reach most followers within seconds — from accounts with a handful of followers up to celebrities with 100M+.",
+    "Design a news feed / timeline like Twitter/X, Instagram, or Facebook: 500M daily active users compose and consume posts, publishing about 300M posts/day (roughly 3.5K writes/sec on average, bursting past 10K/sec during live events), while the home timeline is read about 85 times more often than it's written, roughly 300K reads/sec globally, and a freshly published post needs to reach most followers within seconds — from accounts with a handful of followers up to celebrities with 100M+.",
   ],
   hardParts:
     "The hard parts: fanning a single post out to millions of followers without the write path collapsing (the celebrity problem), keeping a materialized-but-stale timeline cache correct as likes, edits, and deletes land after fan-out has already happened, and ranking each user's feed by relevance without adding seconds of latency to a scroll.",
@@ -33,9 +33,8 @@ export const newsFeed: Problem = {
     nodes: [
       { id: "author", label: "Author", col: 1, row: 1, tone: "slate" },
       { id: "postsvc", label: "Post Service", sub: "stateless writes", col: 2, row: 1, tone: "green" },
-      { id: "postdb", label: "Post Store", sub: "Cassandra · wide-column", col: 3, row: 1, tone: "blue" },
       { id: "mediastore", label: "Media Store", sub: "S3 + CDN", col: 4, row: 1, tone: "blue" },
-      { id: "graphdb", label: "Social Graph", sub: "follower / following edges", col: 5, row: 1, tone: "blue" },
+      { id: "postdb", label: "Post Store", sub: "Cassandra · wide-column", col: 5, row: 1, tone: "blue" },
       { id: "fanoutq", label: "Fan-out Queue", sub: "Kafka", col: 2, row: 2, tone: "orange" },
       {
         id: "fanoutworker",
@@ -49,7 +48,7 @@ export const newsFeed: Problem = {
         id: "timelinecache",
         label: "Timeline Cache",
         sub: "Redis ZSET · ~800 ids/user",
-        col: 4,
+        col: 5,
         row: 2,
         tone: "green",
       },
@@ -63,6 +62,7 @@ export const newsFeed: Problem = {
         tone: "purple",
       },
       { id: "ranker", label: "Ranking Service", sub: "re-score & blend", col: 3, row: 3, tone: "purple" },
+      { id: "graphdb", label: "Social Graph", sub: "follower / following edges", col: 5, row: 3, tone: "blue" },
     ],
     edges: [
       { from: "author", to: "postsvc", label: "compose post", kind: "write" },
@@ -85,6 +85,29 @@ export const newsFeed: Problem = {
       { kind: "analytics", text: "fan-out · async, off the post path, push to followers' timelines" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["author", "postsvc", "postdb"],
+      say: "Two stateless services split write from read: Post Service handles publishes, Post Store is the durable source of truth. Every post lands here once, no matter how many followers the author has.",
+    },
+    {
+      reveal: ["reader", "feedsvc"],
+      say: "Reader hits Feed Service to load a timeline. At an 85:1 read-to-write ratio this side owns almost the whole latency budget, so pulling live from Post Store on every scroll can't survive 300K reads/sec.",
+    },
+    {
+      reveal: ["fanoutq", "fanoutworker", "timelinecache"],
+      say: "So writes fan out off the critical path: Post Service enqueues a Kafka job, a Fan-out Worker pushes the post ID into every follower's Timeline Cache, a Redis sorted set, turning a normal read into one O(1) lookup instead of a live merge.",
+    },
+    {
+      reveal: ["graphdb"],
+      say: "Fan-out and reads both need the follower graph: Social Graph resolves who to push to, and lets Feed Service check which celebrities a reader follows. Above 10K followers we skip fan-out and pull that account's posts live instead — the celebrity problem, solved with one lookup.",
+    },
+    {
+      reveal: ["ranker", "mediastore"],
+      say: "Last mile: Ranking Service re-scores the small candidate set, the cached timeline plus any celebrity pulls, before hydrating and returning the page. Media uploads go straight to S3 behind a CDN, off the metadata write path entirely.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -109,7 +132,7 @@ export const newsFeed: Problem = {
       { id: "NFR-05", text: "Availability (about 52 min downtime per year)", tag: "99.99%" },
       { id: "NFR-06", text: "Fan-out completion for non-celebrity posts, 99% of followers", tag: "< 5s" },
       { id: "NFR-07", text: "Durability: no data loss for published posts", tag: "zero loss" },
-      { id: "NFR-08", text: "Read-to-write ratio that anchors the whole design", tag: "150:1" },
+      { id: "NFR-08", text: "Read-to-write ratio that anchors the whole design", tag: "85:1" },
       { id: "NFR-09", text: "Follower-count threshold before falling back to pull-on-read", tag: "10K followers" },
     ],
   },
@@ -120,25 +143,25 @@ export const newsFeed: Problem = {
       n: 1,
       title: "Sizing: the two numbers that drive everything",
       body: [
-        "Before picking a fan-out strategy, put five numbers on the board: 500M DAU, ~300M posts/day, ~300K feed reads/sec, and a 150:1 read-to-write ratio. That ratio is the whole ballgame — it says the system must be optimized for reads even though the expensive work (fan-out) happens on write, because writes are 150x rarer than reads.",
+        "Before picking a fan-out strategy, put five numbers on the board: 500M DAU, ~300M posts/day, ~300K feed reads/sec, and an 85:1 read-to-write ratio. That ratio is the whole ballgame — it says the system must be optimized for reads even though the expensive work (fan-out) happens on write, because writes are 85x rarer than reads.",
         "The other number that matters just as much is the shape of the follower graph. It is not uniform — it is power-law. A median user has a couple hundred followers, but the tail runs to accounts with 10M, even 100M followers. A design that only works for the median user breaks catastrophically on that tail, which is exactly what the rest of this system is built around.",
       ],
       bullets: [
         { lead: "500M DAU, ~300M posts/day", text: "→ ~3.5K writes/sec average, bursting past 10K/sec during live events and launches." },
-        { lead: "150:1 read:write ratio", text: "the home timeline is read far more than posts are made, so almost the entire latency budget belongs to reads." },
+        { lead: "85:1 read:write ratio", text: "the home timeline is read far more than posts are made, so almost the entire latency budget belongs to reads." },
         { lead: "Follower distribution is power-law", text: "median ~200 followers, 99.9th percentile in the tens of millions — that tail is what breaks a naive design." },
       ],
       pictureTitle: "The two numbers that drive everything",
       pictureRows: [
         { label: "Posts/day ≈ 300M (~3.5K/s avg, 10K/s peak)", value: "write path", tone: "neutral" },
-        { label: "Feed reads ≈ 300K/s (150:1 ratio)", value: "read path — optimize this first", tone: "good" },
+        { label: "Feed reads ≈ 300K/s (85:1 ratio)", value: "read path — optimize this first", tone: "good" },
         { label: "Follower distribution: power-law tail to 100M+", value: "breaks naive fan-out", tone: "bad" },
       ],
       remember: {
         problem: "How big is this system, really?",
-        solution: "500M DAU, 300M posts/day (~3.5K/s avg, 10K/s peak), ~300K feed reads/sec, a 150:1 read:write ratio.",
+        solution: "500M DAU, 300M posts/day (~3.5K/s avg, 10K/s peak), ~300K feed reads/sec, an 85:1 read:write ratio.",
         why: "Every later decision — cache sizing, fan-out strategy, ranking budget — is a consequence of these numbers, not a guess.",
-        tradeoff: "Optimizing for the 150:1 ratio means the read path gets almost the entire latency budget; the write path is allowed to be asynchronous.",
+        tradeoff: "Optimizing for the 85:1 ratio means the read path gets almost the entire latency budget; the write path is allowed to be asynchronous.",
         failure: "Design without naming the ratio and you can't defend why fan-out is async or why the feed is cache-first.",
         mitigation: "Put the numbers on the board first, in the first five minutes, before drawing any boxes.",
       },
@@ -148,7 +171,7 @@ export const newsFeed: Problem = {
       title: "Fan-out on write vs fan-out on read: kill neither, understand both",
       body: [
         "There are two ways to answer 'what's in my feed?' Fan-out on write (push): when a post is created, immediately write its ID into every follower's precomputed timeline, so reading is just fetching one list. Fan-out on read (pull): write nothing at post time; when a user opens their feed, live-merge posts from everyone they follow.",
-        "Push spends write-time work to make reads cheap: O(1) read, but O(followers) write. Pull spends read-time work to make writes cheap: O(1) write, but O(following) read, paid on every single scroll refresh. Given the 150:1 ratio, push wins for typical accounts — it optimizes the operation that happens 150x more often. But push cost scales with follower count, so it collapses precisely on the power-law tail this system has to serve.",
+        "Push spends write-time work to make reads cheap: O(1) read, but O(followers) write. Pull spends read-time work to make writes cheap: O(1) write, but O(following) read, paid on every single scroll refresh. Given the 85:1 ratio, push wins for typical accounts — it optimizes the operation that happens 85x more often. But push cost scales with follower count, so it collapses precisely on the power-law tail this system has to serve.",
       ],
       bullets: [
         { lead: "Push (fan-out on write)", text: "O(1) read, O(followers) write. A 200-follower post costs 200 cache writes — cheap." },
@@ -165,7 +188,7 @@ export const newsFeed: Problem = {
       remember: {
         problem: "Should a post be delivered at write time or assembled at read time?",
         solution: "Neither alone: push for typical accounts, pull for the celebrity tail — a hybrid, covered next.",
-        why: "Reads outnumber writes 150:1, so push wins for normal accounts by making reads O(1); but push cost is O(followers), so it collapses for millions of followers.",
+        why: "Reads outnumber writes 85:1, so push wins for normal accounts by making reads O(1); but push cost is O(followers), so it collapses for millions of followers.",
         tradeoff: "Push spends write-time work to buy cheap reads; pull spends read-time work to buy cheap writes — pick per-account, not globally.",
         failure: "Pure push: one celebrity post triggers tens of millions of fan-out writes and can take hours to land. Pure pull: every read merges hundreds of lists, blowing the p99 budget.",
         mitigation: "Threshold on follower count decides push vs pull per account.",
@@ -325,7 +348,7 @@ export const newsFeed: Problem = {
       "Hybrid fan-out is the core idea: push to followers' precomputed timelines for typical accounts, pull-and-merge at read time for celebrities.",
       "Timelines store post IDs, not content, in a bounded Redis sorted set (~800 entries); content, likes, and deletes are always read live so they never need re-propagating.",
       "Ranking is a cheap re-rank of a small, already-bounded candidate set, not a search over the whole corpus.",
-      "The whole design optimizes reads over writes, because feed reads outnumber posts roughly 150 to 1.",
+      "The whole design optimizes reads over writes, because feed reads outnumber posts roughly 85 to 1.",
     ],
     flows: [
       {
@@ -378,7 +401,7 @@ export const newsFeed: Problem = {
         icon: "🔢",
         items: [
           "500M DAU, 300M posts/day (~3.5K/s avg, 10K/s peak)",
-          "~300K feed reads/sec, 150:1 read:write ratio",
+          "~300K feed reads/sec, 85:1 read:write ratio",
           "Celebrity threshold: ~10K followers decides push vs pull",
           "Timeline cache: ~800 post IDs/user, ~20TB across the Redis cluster",
           "Social graph: ~100B follow edges, power-law tail to 100M+ followers",
@@ -402,7 +425,7 @@ export const newsFeed: Problem = {
         icon: "📣",
         items: [
           "The celebrity problem is the load-bearing risk — name the threshold and the pull-merge fallback unprompted",
-          "150:1 read:write ratio is why the whole system is cache-first and fan-out is async",
+          "85:1 read:write ratio is why the whole system is cache-first and fan-out is async",
           "IDs-not-content in the timeline cache is what makes deletes/edits/likes cheap",
           "Fan-out is best-effort/tier-2; post write and feed read are tier-1",
           "Wide-row pagination for celebrity follower lists — never load 100M rows in one shot",
@@ -420,7 +443,7 @@ export const newsFeed: Problem = {
       goal: "Get five numbers and three product decisions on the board before drawing anything, so the interviewer confirms scope out loud and nothing surprises you later.",
       why: "Numbers are not trivia here. The interviewer is checking whether you drive the design from data. Cache sizing, the fan-out threshold, and the ranking budget all fall out of these numbers, so locking them first is what separates an engineer from someone guessing.",
       steps: [
-        { kind: "ASK", text: '**Is this read-heavy or write-heavy?** Walk them to "~300M posts/day", "~300K feed reads/sec", "150:1 ratio". Write **"3.5K w/s avg, 300K r/s, 150:1"** in the top-left corner of the board.' },
+        { kind: "ASK", text: '**Is this read-heavy or write-heavy?** Walk them to "~300M posts/day", "~300K feed reads/sec", "85:1 ratio". Write **"3.5K w/s avg, 300K r/s, 85:1"** in the top-left corner of the board.' },
         { kind: "ASK", text: 'Next ask: **"How many users, and what does the follower distribution look like?"** Land on "500M DAU" and "power-law tail to 100M+ followers". Write **"500M DAU, power-law tail to 100M followers"** underneath.' },
         { kind: "SAY", text: 'Propose the latency targets yourself: **"sub-200ms p99 on a feed load"**, **"99% of followers see a normal post within 5s"**. Wait for a nod, then write it down.' },
         { kind: "SAY", text: 'State scope. In: "post creation", "fan-out", "home timeline read", "ranking", "the social graph". Out: "search", "DMs", "stories/ephemeral content", "ads targeting". "Let me know if you\'d like me to come back to any of those." Wait for confirmation.' },
@@ -463,7 +486,7 @@ export const newsFeed: Problem = {
       goal: "Show the push/pull framing, the threshold decision, and defend it against pure-push and pure-pull.",
       why: "This is the signature sub-problem. The interviewer is probing whether you can bound fan-out cost for accounts with 50M+ followers, and whether you understand why the answer is different for typical accounts vs. the power-law tail.",
       steps: [
-        { kind: "SAY", text: 'Contrast the two models: "Push is O(1) read, O(followers) write. Pull is O(1) write, O(following) read — paid on every one of the 300K reads/sec." Given the 150:1 ratio, push wins for typical accounts.' },
+        { kind: "SAY", text: 'Contrast the two models: "Push is O(1) read, O(followers) write. Pull is O(1) write, O(following) read — paid on every one of the 300K reads/sec." Given the 85:1 ratio, push wins for typical accounts.' },
         { kind: "DRAW", text: 'Draw the threshold decision at post time: followers < 10K → push into every follower\'s ZSET. followers ≥ 10K → skip fan-out, mark pull-only.' },
         { kind: "SAY", text: 'Explain the read-time merge: "The feed service pulls each followed celebrity\'s recent posts live from the post store and merges them with the reader\'s cached timeline before ranking."' },
         { kind: "RULE OUT", text: 'One line each: **pure push** → a celebrity post becomes tens of millions of writes, hours to land. **pure pull** → every one of 300K reads/sec merges hundreds of lists, blowing the read budget.' },
@@ -537,7 +560,7 @@ export const newsFeed: Problem = {
           "Explains the hydrate step and why deletes/likes don't need re-fan-out.",
           "Frames ranking as a re-rank of a bounded candidate set, not a corpus search.",
           "Shards the social graph by user_id and mentions wide-row pagination for celebrities.",
-          "Names the 150:1 ratio as the reason the whole system is cache-first.",
+          "Names the 85:1 ratio as the reason the whole system is cache-first.",
         ],
         gaps: [
           "Volunteers the celebrity threshold only after the interviewer hints at 'what if someone has 50M followers'.",
@@ -587,7 +610,7 @@ export const newsFeed: Problem = {
       },
       {
         q: "Why not just always pull (fan-out on read) for everyone and skip the celebrity complexity?",
-        a: "Because reads outnumber writes 150:1 — paying a live merge cost on every one of ~300K reads/sec, for every user's full following list, overwhelms compute far worse than the bounded write cost push imposes on the 99%+ of accounts under the celebrity threshold. Pull-everywhere trades a well-understood, bounded write cost for an unbounded-per-read cost multiplied by the system's dominant traffic pattern.",
+        a: "Because reads outnumber writes 85:1 — paying a live merge cost on every one of ~300K reads/sec, for every user's full following list, overwhelms compute far worse than the bounded write cost push imposes on the 99%+ of accounts under the celebrity threshold. Pull-everywhere trades a well-understood, bounded write cost for an unbounded-per-read cost multiplied by the system's dominant traffic pattern.",
       },
       {
         q: "How does ranking avoid feeling stale if heavy features are precomputed offline?",
@@ -609,14 +632,14 @@ export const newsFeed: Problem = {
         heading: "The one-line mental model",
         body: [
           "This is a fan-out problem wearing a feed's clothes. The core operation — get a newly published post in front of the right people — is a delivery problem, and everything expensive in this design (the push/pull split, the bounded cache, the ranking stage) exists to make that delivery fast and cheap at 300K reads/sec against a power-law follower graph.",
-          "Anchor everything on five numbers: 500M DAU, 300M posts/day (~3.5K/s avg, 10K/s peak), ~300K feed reads/sec, a 150:1 read:write ratio, and a sub-200ms p99 feed load. Every structural choice below is a consequence of these numbers, not a preference.",
+          "Anchor everything on five numbers: 500M DAU, 300M posts/day (~3.5K/s avg, 10K/s peak), ~300K feed reads/sec, an 85:1 read:write ratio, and a sub-200ms p99 feed load. Every structural choice below is a consequence of these numbers, not a preference.",
         ],
       },
       {
         heading: "Push vs pull, and why neither wins alone",
         body: [
           "Fan-out on write (push) precomputes each follower's timeline at post time, making reads O(1) at the cost of an O(followers) write. Fan-out on read (pull) does the opposite: writes are O(1), but every feed load must live-merge posts from everyone the reader follows — O(following), paid on every one of the 300K reads/sec this system serves.",
-          "Given the 150:1 ratio, push is the right default: it optimizes the operation that happens 150x more often. But push cost scales with follower count, which means it collapses exactly where the follower graph has its heaviest tail — celebrity accounts with tens of millions of followers.",
+          "Given the 85:1 ratio, push is the right default: it optimizes the operation that happens 85x more often. But push cost scales with follower count, which means it collapses exactly where the follower graph has its heaviest tail — celebrity accounts with tens of millions of followers.",
         ],
       },
       {

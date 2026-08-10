@@ -32,15 +32,15 @@ export const youtube: Problem = {
     caption: "THE WHOLE SYSTEM IN ONE PICTURE",
     nodes: [
       { id: "viewer", label: "Client (Viewer)", col: 1, row: 1, tone: "slate" },
-      { id: "cdn", label: "CDN Edge", sub: "~95% hit · popular videos", col: 2, row: 1, tone: "green" },
       {
         id: "playback",
         label: "Playback API",
         sub: "stateless · resolves manifest + signed URLs",
-        col: 3,
+        col: 2,
         row: 1,
         tone: "green",
       },
+      { id: "cdn", label: "CDN Edge", sub: "~95% hit · popular videos", col: 3, row: 1, tone: "green" },
       {
         id: "metadataDB",
         label: "Metadata DB",
@@ -67,7 +67,7 @@ export const youtube: Problem = {
         tone: "purple",
       },
       { id: "rawBucket", label: "Raw Upload Bucket", sub: "staging, pre-transcode", col: 3, row: 2, tone: "purple" },
-      { id: "jobQueue", label: "Kafka", sub: "transcode job events", col: 2, row: 3, tone: "orange" },
+      { id: "jobQueue", label: "Kafka", sub: "event backbone: transcode jobs + watch-progress pings", col: 2, row: 3, tone: "orange" },
       {
         id: "transcode",
         label: "Transcode Workers",
@@ -76,30 +76,25 @@ export const youtube: Problem = {
         row: 3,
         tone: "orange",
       },
-      {
-        id: "viewPipeline",
-        label: "Kafka + Flink",
-        sub: "watch-time events → view counter",
-        col: 5,
-        row: 3,
-        tone: "orange",
-      },
+      { id: "flink", label: "Flink", sub: "windowed dedup, view aggregation", col: 4, row: 3, tone: "orange" },
+      { id: "counterStore", label: "Counter Store", sub: "aggregated view deltas", col: 5, row: 3, tone: "orange" },
     ],
     edges: [
-      { from: "viewer", to: "cdn", kind: "read" },
-      { from: "cdn", to: "playback", label: "miss", kind: "read" },
+      { from: "viewer", to: "playback", label: "get manifest", kind: "read" },
       { from: "playback", to: "metadataDB", label: "video row + rendition manifest", kind: "read" },
-      { from: "playback", to: "blobStore", label: "signed segment URLs", kind: "read" },
+      { from: "viewer", to: "cdn", label: "fetch segments via signed URLs", kind: "read" },
       { from: "cdn", to: "blobStore", label: "origin fetch on miss", kind: "read" },
       { from: "uploader", to: "uploadSvc", kind: "write" },
       { from: "uploadSvc", to: "rawBucket", label: "chunked PUT, resumable", kind: "write" },
       { from: "uploadSvc", to: "metadataDB", label: "create row, status=processing", kind: "write" },
       { from: "rawBucket", to: "jobQueue", label: "upload complete", kind: "analytics" },
-      { from: "jobQueue", to: "transcode", kind: "analytics" },
+      { from: "jobQueue", to: "transcode", label: "transcode job", kind: "analytics" },
       { from: "transcode", to: "blobStore", label: "write rendition ladder", kind: "analytics" },
       { from: "transcode", to: "metadataDB", label: "status=ready, thumbnails, duration", kind: "analytics" },
-      { from: "playback", to: "viewPipeline", label: "watch-progress ping", kind: "analytics" },
-      { from: "viewPipeline", to: "metadataDB", label: "flush view counts, ~1min batches", kind: "analytics" },
+      { from: "playback", to: "jobQueue", label: "watch-progress ping", kind: "analytics" },
+      { from: "jobQueue", to: "flink", label: "view events", kind: "analytics" },
+      { from: "flink", to: "counterStore", label: "windowed dedup, ~1min", kind: "analytics" },
+      { from: "counterStore", to: "metadataDB", label: "periodic flush, aggregated deltas", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · playback, ~1B hours watched/day" },
@@ -107,6 +102,29 @@ export const youtube: Problem = {
       { kind: "analytics", text: "async/background · transcoding + view counting, never blocks playback or uploads" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["viewer", "playback", "metadataDB"],
+      say: "Start with the read skeleton: the client calls the Playback API directly for a manifest, and the API resolves the video row and rendition pointers from the metadata DB. This call happens on every playback, so it gets its own tight budget: p99 under 100ms.",
+    },
+    {
+      reveal: ["cdn", "blobStore"],
+      say: "The video bytes never come from that API — they come from the CDN edge, which absorbs about 95% of the roughly 1.3 exabytes a day of watch traffic. On a miss, the edge falls back to object storage, so the origin only ever sees the aggregated tail.",
+    },
+    {
+      reveal: ["uploader", "uploadSvc", "rawBucket"],
+      say: "Uploads are a separate, much smaller lane, about 1,400 times less traffic than playback. A resumable chunked PUT lands the raw file in a staging bucket while the Upload Service writes a metadata row with status=processing.",
+    },
+    {
+      reveal: ["jobQueue", "transcode"],
+      say: "Once staging finishes, a Kafka event kicks off the Transcode Workers, which fan a video out into GOP-aligned chunk-by-rendition jobs in parallel, write the finished ladder to object storage, and flip the row to status=ready.",
+    },
+    {
+      reveal: ["flink", "counterStore"],
+      say: "The same Kafka backbone also carries watch-progress pings. Flink windows and dedupes them per user, video, and minute, aggregates the result into a Counter Store, and only that batched delta — never a per-click write — gets flushed back into the metadata row.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -131,7 +149,7 @@ export const youtube: Problem = {
       { id: "NFR-05", text: "Availability of the playback path", tag: "99.95%" },
       { id: "NFR-06", text: "Durability of stored video (no data loss)", tag: "99.999999999%" },
       { id: "NFR-07", text: "View-count freshness on the creator dashboard", tag: "< 1 min" },
-      { id: "NFR-08", text: "Read-to-write ratio (playback requests vs. uploads) that anchors the design", tag: "10000:1" },
+      { id: "NFR-08", text: "Read-to-write ratio (hours watched/day vs. hours uploaded/day) that anchors the design", tag: "~1,400:1" },
       { id: "NFR-09", text: "CDN edge cache hit rate target", tag: "> 95%" },
     ],
   },
@@ -444,7 +462,7 @@ export const youtube: Problem = {
       goal: "Nail down five numbers and the split between the upload/transcode pipeline and the playback pipeline before drawing anything.",
       why: "This system has two fundamentally different workloads sharing one platform. If you don't separate them out loud in the first five minutes, you'll end up drawing one blob that hides the actual design decisions.",
       steps: [
-        { kind: "ASK", text: '**"Is this closer to read-heavy or write-heavy?"** Land on "massively read-heavy" — walk them to "500 hours uploaded/min" vs. "~1B hours watched/day". Write **"upload << watch, ~10000:1"** on the board.' },
+        { kind: "ASK", text: '**"Is this closer to read-heavy or write-heavy?"** Land on "massively read-heavy" — walk them to "500 hours uploaded/min" vs. "~1B hours watched/day". Write **"upload << watch, ~1,400:1"** on the board.' },
         { kind: "ASK", text: 'Ask: **"Video-on-demand only, or live streaming too?"** Scope to VOD as the core problem; park live streaming as a P2 extension if time allows.' },
         { kind: "SAY", text: 'Propose the latency targets yourself: **"p95 time-to-first-frame under 1.5s"**, **"metadata API p99 under 100ms"**. Wait for a nod, then write it down.' },
         { kind: "SAY", text: 'State scope explicitly. In: "upload", "transcoding", "adaptive playback", "CDN strategy", "view counting". Out: "recommendations ranking", "search ranking", "ads", "comments/community". "I\'ll flag if I want to circle back to any of those."' },
@@ -475,7 +493,7 @@ export const youtube: Problem = {
       steps: [
         { kind: "DRAW", text: 'Lay down the **write/upload path**: Client → Upload Service (chunked, resumable) → Raw Upload Bucket, plus Upload Service → Metadata DB (status=processing). Label it **"500 hrs/min"**.' },
         { kind: "DRAW", text: 'Add the **background/transcode lane**, dropping off the raw bucket: → Kafka → Transcode Workers (parallel chunk×rendition fan-out) → Object Storage (rendition ladder) + Metadata DB (status=ready). Label it **"async, minutes not hours"**.' },
-        { kind: "DRAW", text: 'Lay down the **read/playback path**: Client → CDN Edge → Playback API → Metadata DB (manifest lookup) + Object Storage (on a full miss). Label the CDN edge **"~95% hit"**.' },
+        { kind: "DRAW", text: 'Lay down the **read/playback path**: Client → Playback API → Metadata DB (manifest lookup), then a separate hop, Client → CDN Edge → Object Storage (on a full miss), for the actual segment bytes. Label the CDN edge **"~95% hit"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they have three different tolerances — playback is latency-critical and read-heavy, upload is write-heavy but latency-tolerant, and transcoding/view-counting are pure background work that must never leak latency into the other two."' },
       ],
       grading: "Three clearly separated lanes, CDN hit rate and traffic volumes labeled on the arrows, and an explicit statement of why background work never touches the playback critical path.",

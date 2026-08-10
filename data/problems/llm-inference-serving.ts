@@ -60,12 +60,12 @@ export const llmInferenceServing: Problem = {
         row: 1,
         tone: "purple",
       },
-      { id: "prefixcache", label: "Prefix Cache", sub: "radix tree · shared system prompts", col: 2, row: 2, tone: "blue" },
-      { id: "draft", label: "Draft Model", sub: "small model · speculative decoding", col: 4, row: 2, tone: "blue" },
-      { id: "kvcache", label: "GPU KV Cache", sub: "paged blocks · ~80GB/replica HBM", col: 5, row: 2, tone: "blue" },
+      { id: "prefixcache", label: "Prefix Cache", sub: "radix tree · shared system prompts", col: 4, row: 2, tone: "blue" },
+      { id: "kvcache", label: "GPU KV Cache", sub: "paged blocks · ~55GB usable/GPU", col: 5, row: 2, tone: "blue" },
       { id: "weights", label: "Model Weight Store", sub: "blob storage · 140GB checkpoint", col: 1, row: 3, tone: "slate" },
       { id: "autoscaler", label: "GPU Autoscaler", sub: "watches queue depth + KV occupancy", col: 2, row: 3, tone: "orange" },
-      { id: "metrics", label: "Metrics / Observability", sub: "TTFT · ITL · tokens/sec", col: 4, row: 3, tone: "orange" },
+      { id: "metrics", label: "Metrics / Observability", sub: "TTFT · ITL · tokens/sec · queue depth", col: 4, row: 3, tone: "orange" },
+      { id: "draft", label: "Draft Model", sub: "small model · speculative decoding", col: 5, row: 3, tone: "purple" },
     ],
     edges: [
       { from: "client", to: "router", label: "chat request", kind: "read" },
@@ -73,15 +73,18 @@ export const llmInferenceServing: Problem = {
       { from: "queue", to: "prefill", label: "admitted · new prompt", kind: "read" },
       { from: "prefill", to: "decode", label: "handoff after prefill", kind: "read" },
       { from: "decode", to: "client", label: "SSE token stream", kind: "read" },
+      { from: "draft", to: "decode", label: "propose tokens · verified in one pass", kind: "read" },
       { from: "prefill", to: "prefixcache", label: "write/reuse prefix KV blocks", kind: "write" },
+      { from: "prefill", to: "kvcache", label: "allocate blocks for prompt", kind: "write" },
       { from: "decode", to: "kvcache", label: "allocate/free paged blocks", kind: "write" },
-      { from: "decode", to: "draft", label: "verify draft tokens", kind: "write" },
       { from: "weights", to: "prefill", label: "cold start: load 140GB checkpoint", kind: "analytics" },
+      { from: "weights", to: "decode", label: "cold start: load 140GB checkpoint", kind: "analytics" },
       { from: "autoscaler", to: "prefill", label: "scale replicas", kind: "analytics" },
       { from: "autoscaler", to: "decode", label: "scale replicas", kind: "analytics" },
-      { from: "metrics", to: "autoscaler", label: "queue depth + KV occupancy", kind: "analytics" },
+      { from: "queue", to: "metrics", label: "queue depth", kind: "analytics" },
       { from: "prefill", to: "metrics", label: "TTFT", kind: "analytics" },
-      { from: "decode", to: "metrics", label: "ITL · tokens/sec", kind: "analytics" },
+      { from: "decode", to: "metrics", label: "ITL · tokens/sec · KV occupancy", kind: "analytics" },
+      { from: "metrics", to: "autoscaler", label: "queue depth + KV occupancy trend", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "request/response path · 20K req/min" },
@@ -89,6 +92,25 @@ export const llmInferenceServing: Problem = {
       { kind: "analytics", text: "control plane · autoscaling, cold start, metrics" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "router", "queue", "prefill", "decode"],
+      say: "The synchronous skeleton: a chat request goes through the Smart Router into an Admission Queue, then Prefill and Decode run back-to-back and stream tokens straight back to the client — this is the path that has to hit sub-300ms time-to-first-token.",
+    },
+    {
+      reveal: ["prefixcache", "kvcache"],
+      say: "Every token pins GPU memory, so this is where the real constraint lives: Prefill allocates paged KV blocks for the prompt and checks the radix-tree Prefix Cache first, so a repeated system prompt or chat history skips redundant compute instead of being reprocessed.",
+    },
+    {
+      reveal: ["draft"],
+      say: "For latency-sensitive traffic, a small Draft Model proposes several tokens ahead and Decode verifies them in one forward pass, cutting the number of expensive full-model steps needed per output token.",
+    },
+    {
+      reveal: ["weights", "autoscaler", "metrics"],
+      say: "Behind the scenes, Metrics track queue depth, KV occupancy, TTFT, and ITL, and the Autoscaler reacts to the trend rather than the instant reading — because pulling a 140GB checkpoint out of the Weight Store and warming up a new replica takes minutes, not seconds.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -442,7 +464,7 @@ export const llmInferenceServing: Problem = {
       why: "Drawing these as separate lanes proves you understand they run on different timescales and have different failure modes: serving is milliseconds, cache mutation is per-token, autoscaling is minutes. Candidates who draw one blob miss why a cold start can't be an autoscaler's only lever.",
       steps: [
         { kind: "DRAW", text: 'Lay down the **request lane**: Client → Smart Router → Admission Queue → Prefill Pool → Decode Pool → Client. Label arrows **"cache-aware routing"**, **"admitted · new prompt"**, **"SSE token stream"**.' },
-        { kind: "DRAW", text: 'Add the **KV-cache/state lane**: Prefill → Prefix Cache, Decode → GPU KV Cache, labeled **"write/reuse prefix blocks"**, **"allocate/free paged blocks"**.' },
+        { kind: "DRAW", text: 'Add the **KV-cache/state lane**: Prefill → Prefix Cache (**"write/reuse prefix blocks"**), Prefill → GPU KV Cache (**"allocate blocks for prompt"**), Decode → GPU KV Cache (**"allocate/free paged blocks"**).' },
         { kind: "DRAW", text: 'Add the **background/control lane**: Weight Store → Prefill/Decode (**"cold start ~3 min"**), Metrics → Autoscaler → Prefill/Decode (**"scale replicas"**).' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they run on three different timescales — serving is milliseconds, cache mutation is per-token, autoscaling is minutes."' },
       ],

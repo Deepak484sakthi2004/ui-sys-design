@@ -70,8 +70,8 @@ export const ecommerceFlashSales: Problem = {
     edges: [
       { from: "client", to: "cdn", label: "deal page", kind: "read" },
       { from: "client", to: "waitingRoom", label: "join queue @ T-0", kind: "read" },
-      { from: "waitingRoom", to: "apiGateway", label: "admitted token", kind: "read" },
-      { from: "apiGateway", to: "checkout", label: "POST /buy", kind: "write" },
+      { from: "client", to: "apiGateway", label: "admitted token · POST /buy", kind: "write" },
+      { from: "apiGateway", to: "checkout", label: "authorized request", kind: "write" },
       { from: "checkout", to: "inventoryRedis", label: "atomic decrement", kind: "write" },
       { from: "checkout", to: "orderDb", label: "insert PENDING, TTL=5m", kind: "write" },
       { from: "checkout", to: "kafka", label: "order.created", kind: "analytics" },
@@ -79,6 +79,7 @@ export const ecommerceFlashSales: Problem = {
       { from: "payment", to: "orderDb", label: "CONFIRMED / FAILED", kind: "analytics" },
       { from: "kafka", to: "reconciler", label: "watch reservation TTL", kind: "analytics" },
       { from: "reconciler", to: "inventoryRedis", label: "release on timeout/fail", kind: "analytics" },
+      { from: "reconciler", to: "orderDb", label: "mark EXPIRED", kind: "analytics" },
       { from: "payment", to: "fulfillment", label: "on CONFIRMED", kind: "analytics" },
     ],
     legend: [
@@ -87,6 +88,29 @@ export const ecommerceFlashSales: Problem = {
       { kind: "analytics", text: "async · payment, fulfillment, reservation release — never blocks the buy ACK" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "apiGateway", "checkout", "orderDb"],
+      say: "Start with the plain checkout skeleton: a client calls the API gateway, which hands off to a stateless Checkout Service that writes an order. This is exactly the shape that falls over the instant 5 million people hit Buy Now in the same second.",
+    },
+    {
+      reveal: ["waitingRoom"],
+      say: "The fix for the stampede isn't a bigger database, it's admission control. Every client joins a virtual waiting room first, and a token-bucket admitter releases them at a rate the checkout path can actually survive — about 20K/sec, not the raw 5M/sec spike.",
+    },
+    {
+      reveal: ["inventoryRedis"],
+      say: "The decrement itself is the hot key: 500 requests racing for every unit. A sharded Redis cluster running an atomic Lua DECR-if-positive script is what lets Checkout answer 'do you get a unit' in under 150ms with no DB row lock in the loop.",
+    },
+    {
+      reveal: ["kafka", "payment", "reconciler"],
+      say: "Winning the decrement isn't a sale — it's a PENDING reservation. Checkout fires order.created onto Kafka and returns immediately; Payment confirms or fails asynchronously, and a Reservation Reconciler watches the 5-minute TTL and releases any unit whose payment never lands.",
+    },
+    {
+      reveal: ["cdn", "fulfillment"],
+      say: "Round out the edges: the deal page itself is a static, CDN-cached asset so 10 million viewers never touch the origin, and Fulfillment/Notify only fires once Payment confirms an order.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -448,7 +472,7 @@ export const ecommerceFlashSales: Problem = {
       why: "Separating these three lanes is the whole architectural insight. Candidates who draw a single client-to-DB blob miss that the waiting room and the async tier exist specifically to protect the tiny synchronous core.",
       steps: [
         { kind: "DRAW", text: 'Lay down the **read path**: Client → CDN (deal page) and Client → Waiting Room → Admitter. Label **"10M concurrent viewers"**, **"20K admits/s"**.' },
-        { kind: "DRAW", text: 'Add the **write path**: Admitter → API Gateway → Checkout Service → Inventory Shards (Redis) + Order DB. Label **"atomic Lua decrement"**, **"insert PENDING, TTL=5m"**.' },
+        { kind: "DRAW", text: 'Add the **write path**: Client (with its admitted token) → API Gateway → Checkout Service → Inventory Shards (Redis) + Order DB. Label **"atomic Lua decrement"**, **"insert PENDING, TTL=5m"**.' },
         { kind: "DRAW", text: 'Add the **async path** off Checkout Service: → Kafka → Payment Service → Order DB (CONFIRMED/FAILED), and Kafka → Reconciler → back to Inventory Shards (release). Label **"never blocks the buy-now ACK"**.' },
         { kind: "SAY", text: 'Narrate: "Three lanes because they have three different jobs — the read lane absorbs volume, the write lane must be atomic and fast, the async lane can take as long as it needs up to the TTL."' },
       ],

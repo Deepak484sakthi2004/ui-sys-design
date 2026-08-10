@@ -65,6 +65,8 @@ export const github: Problem = {
       { from: "lb", to: "repoRouter", label: "route by repo_id · push", kind: "write" },
       { from: "repoRouter", to: "spokes", label: "Raft leader · quorum write", kind: "write" },
       { from: "lb", to: "prService", label: "open/review/merge PR", kind: "write" },
+      { from: "prService", to: "spokes", label: "diff read · base..head blobs/trees", kind: "read" },
+      { from: "prService", to: "spokes", label: "merge commit · quorum write", kind: "write" },
       { from: "prService", to: "metaDB", label: "comments, review state, merge queue", kind: "write" },
       { from: "spokes", to: "kafka", label: "post-receive event", kind: "analytics" },
       { from: "kafka", to: "webhook", label: "fan-out", kind: "analytics" },
@@ -77,6 +79,25 @@ export const github: Problem = {
       { kind: "analytics", text: "async lane · webhooks, Actions triggers, search — never blocks a push" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "repoRouter", "spokes"],
+      say: "Start with the core git loop: a client pushes or pulls through a front door that speaks smart HTTP and SSH. A repo router consistent-hashes the repo id to find its storage location, and Spokes holds the actual git objects — replicated three ways with a Raft-elected leader taking writes.",
+    },
+    {
+      reveal: ["prService", "metaDB"],
+      say: "Pull requests and issues are a different data problem: relational, transactional metadata. The PR Service reads commits and blobs straight out of Spokes to compute a diff, then persists comments and review state into MySQL, sharded by repo_id via Vitess — and because a merge is still a git write, it lands a real commit back into Spokes too.",
+    },
+    {
+      reveal: ["kafka"],
+      say: "Every write that lands in Spokes, a push or a merge, drops a single post-receive event into Kafka after the client's ack has already gone out. Nothing downstream is allowed to add latency to that write.",
+    },
+    {
+      reveal: ["webhook", "actions", "blackbird"],
+      say: "Three consumers read that same event at their own pace: the Webhook Dispatcher fires signed callbacks out to integrations, Actions Runners pick up CI workflows, and Blackbird re-tokenizes only the blobs that changed, so search stays fresh without ever re-indexing the world.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

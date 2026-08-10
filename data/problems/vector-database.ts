@@ -83,6 +83,25 @@ export const vectorDatabase: Problem = {
     ],
   },
 
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "shard", "upsert"],
+      say: "Two entry points that never share a path: the Query Gateway routes reads to a Vector Shard's in-RAM HNSW graph, and a separate Upsert API takes writes. At 2:1 read-to-write, neither side is negligible.",
+    },
+    {
+      reveal: ["metaidx", "merge"],
+      say: "A similarity query has no partition key, so it eventually fans out to every shard. Merge + Rerank combines each shard's local top-k, and a Metadata Index of Roaring bitmaps lets the graph walk skip filtered-out vectors without silently starving recall.",
+    },
+    {
+      reveal: ["wal", "segwriter"],
+      say: "On the write side, an upsert is durably appended to a Kafka WAL before it's ever acknowledged — that's the actual durability boundary. A Segment Writer then buffers it unindexed, brute-force searchable within seconds, long before it's anywhere near the graph.",
+    },
+    {
+      reveal: ["builder", "compactor", "objstore"],
+      say: "Off the query path entirely: the Index Builder seals a buffer and builds its HNSW graph async, a Compactor merges small segments and physically applies deletes, and Object Store holds durable snapshots so a replacement replica bootstraps without replaying the whole WAL.",
+    },
+  ],
+
   // -------------------------------------------------------------------------
   requirements: {
     functional: [
@@ -107,7 +126,7 @@ export const vectorDatabase: Problem = {
       { id: "NFR-06", text: "Durability of vectors and metadata after ack", tag: "zero loss" },
       { id: "NFR-07", text: "In-memory index footprint for 1B × 768-dim vectors", tag: "< 300GB" },
       { id: "NFR-08", text: "Cluster scale, single collection", tag: "1B+ vectors" },
-      { id: "NFR-09", text: "Read-to-write ratio that anchors sharding and replica count", tag: "20:1" },
+      { id: "NFR-09", text: "Read-to-write ratio that anchors sharding and replica count", tag: "2:1" },
     ],
   },
 
@@ -374,7 +393,7 @@ export const vectorDatabase: Problem = {
           "PQ compression ≈ 32×: ~96GB for codes + ~128GB graph links ≈ 220-300GB resident",
           "~40 shards × ~25M vectors, ~6-8GB/shard, RF=3",
           "efSearch=64 → ~90% recall @ ~5ms; efSearch=128 → ~96% @ ~15ms; efSearch=256 → ~98%+ @ ~30-40ms",
-          "10K QPS reads, 5K/s upserts, 20:1 read:write",
+          "10K QPS reads, 5K/s upserts, 2:1 read:write",
           "Freshness: seconds (hot buffer), not minutes (graph build)",
         ],
       },
@@ -412,7 +431,7 @@ export const vectorDatabase: Problem = {
       why: "This problem has more load-bearing numbers than most: dimensionality alone swings memory footprint by gigabytes. The interviewer is checking whether you size before you design, and whether you know approximate search means recall is itself a requirement, not an afterthought.",
       steps: [
         { kind: "ASK", text: '**"How many vectors, and what dimensionality?"** Land on "1B vectors, 768-dim" (a common embedding size). Write **"1B × 768-dim"** top-left.' },
-        { kind: "ASK", text: '**"What\'s the read and write rate?"** Land on "10K queries/sec, 5K upserts/sec, 20:1". Write it under the vector count.' },
+        { kind: "ASK", text: '**"What\'s the read and write rate?"** Land on "10K queries/sec, 5K upserts/sec, 2:1". Write it under the vector count.' },
         { kind: "SAY", text: 'Propose the recall/latency budget yourself: **"p99 < 50ms"**, **"recall@10 > 95%"**. Wait for a nod — recall is a real requirement here, not a nice-to-have.' },
         { kind: "SAY", text: 'State scope. In: "ANN search, metadata filtering, the write path, sharding." Out: "generating the embeddings themselves, the ML model serving that produces them." "Let me know if you want me to cover that too." Wait for confirmation.' },
         { kind: "WRITE", text: 'Do the storage math out loud: **"768 dims × 4 bytes = 3,072 bytes/vector"**, **"× 1B = ~3.07TB raw"**. Flag it: "that\'s why compression isn\'t optional here." Write the number down.' },

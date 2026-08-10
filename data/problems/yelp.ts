@@ -56,8 +56,8 @@ export const yelp: Problem = {
       },
       { id: "cdc", label: "Kafka (CDC)", col: 2, row: 4, tone: "orange" },
       { id: "fraud", label: "Fraud / ML Scorer", sub: "async, minutes-scale", col: 3, row: 4, tone: "orange" },
-      { id: "indexer", label: "Indexer", sub: "near-real-time upsert", col: 4, row: 4, tone: "orange" },
-      { id: "aggregator", label: "Rating Aggregator", sub: "signed delta, not recompute", col: 3, row: 5, tone: "orange" },
+      { id: "aggregator", label: "Rating Aggregator", sub: "signed delta, not recompute", col: 4, row: 4, tone: "orange" },
+      { id: "indexer", label: "Indexer", sub: "near-real-time upsert", col: 5, row: 4, tone: "orange" },
     ],
     edges: [
       { from: "client", to: "lb", kind: "read" },
@@ -73,6 +73,7 @@ export const yelp: Problem = {
       { from: "cdc", to: "aggregator", label: "review event", kind: "analytics" },
       { from: "fraud", to: "aggregator", label: "recommended flag", kind: "analytics" },
       { from: "aggregator", to: "primary_db", label: "update denormalized rating", kind: "write" },
+      { from: "aggregator", to: "cache", label: "invalidate on write", kind: "write" },
       { from: "indexer", to: "es", label: "near-real-time upsert", kind: "write" },
     ],
     legend: [
@@ -81,6 +82,29 @@ export const yelp: Problem = {
       { kind: "analytics", text: "async · fraud, aggregation, reindex — never blocks a write" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "search_svc", "review_svc"],
+      say: "Two stateless services behind a regional load balancer, search and review, so a spike in review writes can never slow down a search.",
+    },
+    {
+      reveal: ["es", "primary_db"],
+      say: "Each service gets its own store: Elasticsearch, sharded by geography so a local query never scatter-gathers, and a primary DB sharded by business_id holding the source-of-truth rows plus the denormalized rating.",
+    },
+    {
+      reveal: ["cache"],
+      say: "Detail-page reads are heavily Zipf-skewed, so Redis sits in front of the primary DB, catching about 90 percent of hydration calls before they ever touch the database.",
+    },
+    {
+      reveal: ["cdc"],
+      say: "Every write to the primary DB streams out through CDC — that's the seam that lets everything downstream stay off the write's critical path.",
+    },
+    {
+      reveal: ["fraud", "aggregator", "indexer"],
+      say: "Three consumers fan out from that one stream: fraud scoring that can reclassify a review days later, a rating aggregator that applies signed deltas and also invalidates the cache, and an indexer that keeps Elasticsearch near-real-time — none of them ever block a write.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -105,7 +129,7 @@ export const yelp: Problem = {
       { id: "NFR-05", text: "Availability (about 4.4h downtime/year)", tag: "99.95%" },
       { id: "NFR-06", text: "Review durability: no data loss once accepted", tag: "zero loss" },
       { id: "NFR-07", text: "Visible rating-aggregate freshness, from write/reclassify to display", tag: "< 60s" },
-      { id: "NFR-08", text: "Read-to-write ratio that anchors the whole design", tag: "~500:1" },
+      { id: "NFR-08", text: "Read-to-write ratio that anchors the whole design", tag: "~20:1" },
     ],
   },
 
@@ -346,7 +370,7 @@ export const yelp: Problem = {
           "50M businesses, ~300M reviews (~6/business avg)",
           "Search: 20K qps sustained, p99 < 200ms",
           "Reviews: 1K/sec sustained writes, 5K/sec peak",
-          "Read:write ratio ~500:1 anchors the whole design",
+          "Read:write ratio ~20:1 anchors the whole design",
           "Geo-cell size: geohash/S2 precision 6 ≈ 1.2km × 0.6km",
           "Rating aggregate freshness target: < 60s",
           "Redis holds the hot fraction of businesses, ~90% detail-page hit rate",
@@ -385,7 +409,7 @@ export const yelp: Problem = {
       goal: "Get five numbers and three product decisions on the board before drawing anything, so nothing surprises you later.",
       why: "Every later decision (geo-shard size, cache size, ranking weights) is a consequence of these numbers, not a preference. Locking them first is what separates driving the design from guessing at it.",
       steps: [
-        { kind: "ASK", text: '**Is this read-heavy or write-heavy?** Walk them to "20K searches/sec" vs "1K review writes/sec", a "~500:1" ratio. Write **"20K r/s search, 1K w/s reviews, 500:1"** in the top-left corner.' },
+        { kind: "ASK", text: '**Is this read-heavy or write-heavy?** Walk them to "20K searches/sec" vs "1K review writes/sec", a "~20:1" ratio. Write **"20K r/s search, 1K w/s reviews, 20:1"** in the top-left corner.' },
         { kind: "ASK", text: 'Next: **"Are searches global or local?"** Land on "almost every search carries a location — metro-local, not global fan-out". Write **"location-scoped, not global"** underneath.' },
         { kind: "SAY", text: 'Propose latency targets yourself: **"search p99 < 200ms"**, **"cached detail page p99 < 50ms"**. Wait for a nod, then write it down.' },
         { kind: "SAY", text: 'State scope. In: "geo search", "ranking", "review writes", "rating aggregation", "fraud filtering". Out: "payments", "messaging", "ads". "Let me know if you\'d like me to come back to any of those."' },
@@ -573,7 +597,7 @@ export const yelp: Problem = {
         heading: "The one-line mental model",
         body: [
           "This is a geo-constrained search problem wrapped around a read-heavy, fraud-aware review store. The core read — find nearby businesses ranked by relevance, distance, and a trustworthy rating — has to run at 20K qps with sub-200ms p99, and the core write — accept a review — has to commit fast while the expensive judgment about whether that review should count happens later.",
-          "Anchor everything on five numbers: 50M businesses, ~300M reviews, 20K searches/sec, 1K review writes/sec (5K peak), and a ~500:1 read:write ratio. Every structural choice below is a consequence of these numbers.",
+          "Anchor everything on five numbers: 50M businesses, ~300M reviews, 20K searches/sec, 1K review writes/sec (5K peak), and a ~20:1 read:write ratio. Every structural choice below is a consequence of these numbers.",
         ],
       },
       {

@@ -7,7 +7,7 @@ export const taggingSystem: Problem = {
   level: "Medium",
   deepDiveAvailable: true,
   intro: [
-    "Design a tagging system that lets any entity — a photo, document, product listing, or support ticket — carry a set of free-form or curated tags: 5B tagged entities, ~15B tag associations across 25M unique tags, sustaining 50K new taggings/sec, serving 300K 'browse by tag' reads/sec and 80K autocomplete lookups/sec at sub-50ms p99, while a handful of tags like 'photography' attach to tens of millions of entities each.",
+    "Design a tagging system that lets any entity — a photo, document, product listing, or support ticket — carry a set of free-form or curated tags: 5B tagged entities, ~15B tag associations across 25M unique tags, sustaining 50K new taggings/sec, serving 300K 'browse by tag' reads/sec at sub-80ms p99 and 80K autocomplete lookups/sec at sub-50ms p99, while a handful of tags like 'photography' attach to tens of millions of entities each.",
   ],
   hardParts:
     "The hard parts: keeping a bidirectional index (entity→tags and tag→entities) consistent at billions of rows without cross-partition transactions, surviving the hot-partition problem when a small number of tags attach to a huge fraction of all content, and serving typo-tolerant, freshness-sensitive autocomplete over tens of millions of tag names.",
@@ -55,8 +55,16 @@ export const taggingSystem: Problem = {
         id: "autocomplete_svc",
         label: "Autocomplete Service",
         sub: "typeahead · 80K/s · p99<50ms",
-        mono: "Redis ZRANGEBYLEX prefix scan",
         col: 3,
+        row: 2,
+        tone: "green",
+      },
+      {
+        id: "autocomplete_store",
+        label: "Autocomplete Index",
+        sub: "Redis sorted set · lex tag names",
+        mono: "ZRANGEBYLEX prefix scan",
+        col: 4,
         row: 2,
         tone: "green",
       },
@@ -66,7 +74,7 @@ export const taggingSystem: Problem = {
         sub: "Redis sorted set, decaying score",
         col: 5,
         row: 2,
-        tone: "blue",
+        tone: "green",
       },
       { id: "kafka", label: "Kafka", sub: "tag-change events", col: 2, row: 3, tone: "orange" },
       {
@@ -101,14 +109,15 @@ export const taggingSystem: Problem = {
       { from: "browse_svc", to: "valkey", label: "~70% hit", kind: "read" },
       { from: "valkey", to: "scylla_inv", label: "miss · read 1-2 buckets", kind: "read" },
       { from: "lb", to: "autocomplete_svc", kind: "read" },
-      { from: "autocomplete_svc", to: "valkey", label: "prefix cache", kind: "read" },
+      { from: "autocomplete_svc", to: "autocomplete_store", label: "prefix scan", kind: "read" },
       { from: "autocomplete_svc", to: "trending", label: "rank suggestions", kind: "read" },
+      { from: "browse_svc", to: "trending", label: "leaderboard reads", kind: "read" },
       { from: "lb", to: "tag_svc", kind: "write" },
       { from: "tag_svc", to: "forward_store", label: "sync write · quorum", kind: "write" },
       { from: "tag_svc", to: "kafka", label: "async fan-out event", kind: "analytics" },
       { from: "kafka", to: "flink", kind: "analytics" },
       { from: "flink", to: "scylla_inv", label: "append to posting list", kind: "analytics" },
-      { from: "flink", to: "autocomplete_svc", label: "refresh prefix trie", kind: "analytics" },
+      { from: "flink", to: "autocomplete_store", label: "ZADD refresh trie", kind: "analytics" },
       { from: "flink", to: "trending", label: "increment decaying score", kind: "analytics" },
     ],
     legend: [
@@ -117,6 +126,25 @@ export const taggingSystem: Problem = {
       { kind: "analytics", text: "async fan-out · index, trie, and trending catch up within seconds" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "browse_svc", "tag_svc"],
+      say: "Two stateless services behind one gateway: Browse Service for by-tag reads, Tagging Service for writes. Reads run 6 to 1 over writes, so the browse path is the one carrying the hard latency budget.",
+    },
+    {
+      reveal: ["forward_store", "scylla_inv"],
+      say: "Every tag write lands synchronously in Cassandra's forward index, entity_id to tags, and that's what the client actually waits on. Browse reads come from a separate ScyllaDB inverted index, tag_id to entities, bucketed by tag_id plus time so one viral tag can't hot-spot a single partition.",
+    },
+    {
+      reveal: ["valkey", "autocomplete_svc", "autocomplete_store"],
+      say: "A Valkey page cache catches about 70% of browse reads before they ever touch Scylla. Autocomplete is a separate typeahead service backed by its own Redis sorted set, doing a ZRANGEBYLEX prefix scan for sub-50ms suggestions.",
+    },
+    {
+      reveal: ["kafka", "flink", "trending"],
+      say: "The Tagging Service acks the client the instant the forward write lands, then drops a tag-changed event on Kafka. Flink fans that one event out to the inverted index, the autocomplete trie, and a decaying trending score, all within a 5-second freshness budget, never blocking the write.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -207,7 +235,7 @@ export const taggingSystem: Problem = {
       n: 3,
       title: "Hot-tag partitions: the load-bearing risk",
       body: [
-        "Tag popularity follows a Zipf-like skew: a small number of tags ('photography', 'food', 'javascript') attach to tens of millions of entities, while the long tail has a handful each. A naive inverted index with partition key = tag_id blows straight past a healthy partition size (a few hundred thousand rows / ~100MB before performance degrades) for the biggest tags by two to three orders of magnitude — every read and write for that tag lands on the same replica set, a classic hot partition.",
+        "Tag popularity follows a Zipf-like skew: a small number of tags ('photography', 'food', 'javascript') attach to tens of millions of entities, while the long tail has a handful each. A naive inverted index with partition key = tag_id blows straight past a healthy partition size (~100K rows / ~100MB before performance degrades) for the biggest tags by two to three orders of magnitude — every read and write for that tag lands on the same replica set, a classic hot partition.",
         "The fix is to bucket the posting list: partition key becomes tag_id + bucket, where bucket is a time window (e.g. per day) or a hash of the entity id modulo N. Browsing is usually recency-ordered, so time-bucketing is the natural choice — a 'newest first' page only has to read the most recent bucket or two, and older buckets are touched only as the user paginates deeper. Bucket count is adaptive: a cold tag gets one bucket, a top-0.1% tag gets hundreds.",
       ],
       bullets: [
@@ -483,7 +511,7 @@ export const taggingSystem: Problem = {
       goal: "Show the naive partition key failing, then the time-bucketed fix, with numbers.",
       why: "This is the signature sub-problem. The interviewer wants to see you name the skew, quantify why a bare tag_id partition key fails, and defend a concrete bucketing scheme.",
       steps: [
-        { kind: "SAY", text: '"Partition size has a practical ceiling, roughly a few hundred thousand rows. A bare tag_id partition key for a top tag with 10M+ entities blows past that by 100x — every read and write for that tag hits one replica set."' },
+        { kind: "SAY", text: '"Partition size has a practical ceiling, roughly ~100K rows. A bare tag_id partition key for a top tag with 10M+ entities blows past that by 100x — every read and write for that tag hits one replica set."' },
         { kind: "DRAW", text: 'Draw the fix: partition key = **"tag_id + bucket"**, bucket = time window. "Browsing is newest-first, so a first page only reads the latest bucket or two."' },
         { kind: "SAY", text: '"Bucket count is adaptive — cold tags get one bucket, hot tags scale to hundreds as their write volume grows. We monitor per-tag write rate and grow buckets proactively."' },
         { kind: "RULE OUT", text: '"Hashing entity_id into a fixed N buckets is an alternative to time-bucketing, but it scatters recency-ordered reads across all N buckets on every page. Time-bucketing matches the actual access pattern better." Cross it off as the primary scheme.' },

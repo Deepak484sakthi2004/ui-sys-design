@@ -32,7 +32,7 @@ export const leetcode: Problem = {
     caption: "THE WHOLE SYSTEM IN ONE PICTURE",
     nodes: [
       { id: "client", label: "Client", sub: "web / IDE", col: 1, row: 2, tone: "slate" },
-      { id: "gateway", label: "API Gateway", sub: "auth · LB", col: 2, row: 2, tone: "slate" },
+      { id: "gateway", label: "API Gateway", sub: "auth · LB · holds WS conns", col: 2, row: 2, tone: "slate" },
       { id: "problem", label: "Problem Service", sub: "statements · tags", col: 2, row: 1, tone: "green" },
       {
         id: "submission",
@@ -43,7 +43,7 @@ export const leetcode: Problem = {
         tone: "purple",
       },
       { id: "postgres", label: "PostgreSQL", sub: "problems · submissions · users", col: 4, row: 1, tone: "blue" },
-      { id: "redis", label: "Redis", sub: "rate limit · status cache", col: 4, row: 2, tone: "blue" },
+      { id: "redis", label: "Redis", sub: "rate limit · pub/sub · leaderboard ZSET", col: 4, row: 2, tone: "blue" },
       { id: "kafka", label: "Kafka", sub: "judge-jobs, priority partitions", col: 3, row: 3, tone: "purple" },
       {
         id: "judge",
@@ -55,7 +55,7 @@ export const leetcode: Problem = {
         tone: "purple",
       },
       { id: "testcases", label: "Test Case Store", sub: "S3, cached on judge node", col: 5, row: 3, tone: "slate" },
-      { id: "results", label: "Result Consumer", sub: "verdict → status update", col: 4, row: 4, tone: "purple" },
+      { id: "results", label: "Result Consumer", sub: "persist verdict → notify", col: 4, row: 4, tone: "purple" },
       {
         id: "leaderboard",
         label: "Contest Leaderboard",
@@ -71,16 +71,20 @@ export const leetcode: Problem = {
       { from: "problem", to: "postgres", label: "statement + samples", kind: "read" },
       { from: "client", to: "gateway", label: "submit code", kind: "write" },
       { from: "gateway", to: "submission", kind: "write" },
-      { from: "submission", to: "redis", label: "rate limit + idempotency check", kind: "write" },
-      { from: "submission", to: "postgres", label: "insert, status=PENDING", kind: "write" },
+      { from: "submission", to: "redis", label: "token-bucket rate limit", kind: "write" },
+      { from: "submission", to: "postgres", label: "idempotent insert, status=PENDING", kind: "write" },
       { from: "submission", to: "kafka", label: "enqueue judge job", kind: "write" },
       { from: "kafka", to: "judge", label: "consume, priority partitions", kind: "write" },
       { from: "judge", to: "testcases", label: "fetch hidden tests, cached", kind: "write" },
       { from: "judge", to: "results", label: "publish verdict", kind: "write" },
       { from: "results", to: "postgres", label: "update status + stats", kind: "write" },
-      { from: "results", to: "client", label: "WS push verdict", kind: "write" },
+      { from: "results", to: "redis", label: "publish verdict, pub/sub", kind: "write" },
+      { from: "redis", to: "gateway", label: "subscribed channel, forward", kind: "write" },
+      { from: "gateway", to: "client", label: "WS push verdict", kind: "write" },
       { from: "results", to: "leaderboard", label: "contest only, async", kind: "analytics" },
       { from: "leaderboard", to: "redis", label: "ZADD rank + penalty", kind: "analytics" },
+      { from: "client", to: "gateway", label: "view leaderboard", kind: "analytics" },
+      { from: "gateway", to: "leaderboard", label: "fetch standings", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · browsing problems" },
@@ -88,6 +92,29 @@ export const leetcode: Problem = {
       { kind: "analytics", text: "contest leaderboard · async, never blocks judging" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "problem", "postgres"],
+      say: "Start with the read lane: browsing problems is an ordinary cached lookup — Client, API Gateway, Problem Service, and Postgres holding the statements and samples.",
+    },
+    {
+      reveal: ["submission", "redis"],
+      say: "Submitting code adds the Submission Service. Redis enforces a token-bucket rate limit, and the write to Postgres is an idempotent insert keyed on the client's idempotency key, so a retried click never enqueues twice.",
+    },
+    {
+      reveal: ["kafka", "judge", "testcases"],
+      say: "The job lands on a Kafka partition — contest and practice traffic kept separate — and a Judge Worker Pool pulls it, compiles it, and runs it inside a gVisor sandbox against hidden tests pulled from the Test Case Store.",
+    },
+    {
+      reveal: ["results"],
+      say: "The Result Consumer persists the verdict to Postgres before committing the Kafka offset, so a crashed worker safely redelivers instead of losing a result, then publishes the verdict over Redis pub/sub, which the API Gateway forwards down the client's live WebSocket connection.",
+    },
+    {
+      reveal: ["leaderboard"],
+      say: "On an Accepted verdict during a contest window, the Result Consumer also updates the Contest Leaderboard, a Redis sorted set the Gateway queries for live standings — frozen the last 5-10 minutes and reconciled from Postgres after the contest ends.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -255,7 +282,7 @@ export const leetcode: Problem = {
         { lead: "Client idempotency key", text: "a UUID generated at the Submit click travels with the request; the Submission Service does an insert keyed on (user, problem, key) that no-ops on a retry, so a doubled network call never enqueues twice." },
         { lead: "Commit-after-persist", text: "the Kafka consumer offset for a judge job is only committed after the verdict is durably written to Postgres, so a worker crash mid-run causes a safe redelivery and rejudge rather than a silently lost submission." },
         { lead: "Idempotent write, not idempotent judge", text: "rejudging the same submission twice is fine because the result write uses the same idempotency key — 'redelivered' overwrites the same row, it does not create a second one." },
-        { lead: "Push via pub/sub", text: "a completed verdict fires a Redis Pub/Sub message on a per-submission channel; a WebSocket Gateway holds the client connection and forwards it in real time." },
+        { lead: "Push via pub/sub", text: "a completed verdict fires a Redis Pub/Sub message on a per-submission channel; the API Gateway holds the client's WebSocket connection and forwards it in real time." },
         { lead: "Polling as a fallback", text: "if the WebSocket drops, the client falls back to GET /submissions/:id, so an update is only ever delayed, never lost." },
       ],
       pictureTitle: "Where exactly-once is actually enforced",
@@ -282,7 +309,7 @@ export const leetcode: Problem = {
         "Two more real-world requirements come from actual contest platforms: a freeze window near the end so people can't snipe rank by watching others solve in real time, and a post-contest reconciliation pass that recomputes final standings from the durable log in case the live cache lost anything mid-contest.",
       ],
       bullets: [
-        { lead: "Redis ZSET per contest", text: "ZADD on every Accepted verdict; score combines problems solved (weighted) and accumulated penalty time, giving O(log N) inserts and O(log N + k) range reads for a leaderboard page." },
+        { lead: "Redis ZSET per contest", text: "ZADD on every Accepted verdict; score = problems_solved × large_constant − penalty_seconds, so more solves always outrank fewer regardless of time, and ties among equal solve counts fall out to lower penalty automatically. O(log N) inserts, O(log N + k) range reads for a leaderboard page." },
         { lead: "Penalty-time tie-break", text: "ties on problems-solved are broken by total penalty time (time to solve plus a fixed penalty per wrong submission), matching how competitive-programming judges score." },
         { lead: "Freeze window", text: "standings shown to competitors freeze for the last 5-10 minutes of the contest; real ranks are computed and revealed only after the contest ends, preventing last-minute sniping of who's about to pass whom." },
         { lead: "Post-contest reconciliation", text: "Postgres's append-only submission log is the actual source of truth; final standings are recomputed from it after the contest closes, so a Redis restart mid-contest can never corrupt the official result." },
@@ -339,7 +366,8 @@ export const leetcode: Problem = {
           { label: "Judge Worker Pool", note: "gVisor sandbox: compile → run hidden tests → compare" },
           { label: "Test Case Store", note: "hidden tests fetched from S3, cached on the judge node" },
           { label: "Result Consumer", note: "persists verdict, commits Kafka offset only after persist" },
-          { label: "WebSocket push", note: "client sees Pending → Running → Verdict live" },
+          { label: "Redis Pub/Sub", note: "verdict published on a per-submission channel" },
+          { label: "API Gateway → WebSocket push", note: "subscribed gateway forwards it; client sees Pending → Running → Verdict live" },
         ],
       },
       {
@@ -432,8 +460,8 @@ export const leetcode: Problem = {
       why: "Separating these three lanes proves you understand they carry different SLAs and failure tolerances — a leaderboard hiccup should never touch judging, and judging should never touch problem browsing.",
       steps: [
         { kind: "DRAW", text: 'Lay down the **read lane**: Client → API Gateway → Problem Service → PostgreSQL. Label it **"browsing, normal cached reads."**' },
-        { kind: "DRAW", text: 'Lay down the **write lane**: Client → Gateway → Submission Service → Redis (rate limit + idempotency) → PostgreSQL (insert) → Kafka → Judge Worker Pool (sandbox) → Test Case Store → Result Consumer → PostgreSQL (update) → WS push to Client. Label arrows with the numbers: **"500/s steady, 5K/s burst"**, **"gVisor sandbox"**.' },
-        { kind: "DRAW", text: 'Add the **analytics lane** dropping off the Result Consumer: → Contest Leaderboard → Redis ZSET, dashed, labeled **"async, contest-only, never blocks a verdict."**' },
+        { kind: "DRAW", text: 'Lay down the **write lane**: Client → Gateway → Submission Service → Redis (rate limit) → PostgreSQL (idempotent insert) → Kafka → Judge Worker Pool (sandbox) → Test Case Store → Result Consumer → PostgreSQL (update) → Redis Pub/Sub → API Gateway → WS push to Client. Label arrows with the numbers: **"500/s steady, 5K/s burst"**, **"gVisor sandbox"**.' },
+        { kind: "DRAW", text: 'Add the **analytics lane** dropping off the Result Consumer: → Contest Leaderboard → Redis ZSET, dashed, labeled **"async, contest-only, never blocks a verdict."** Note that the client also reads standings back through the Gateway, the same way it reads any other page.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they fail differently — a leaderboard outage is cosmetic, a judging outage is the whole product, and a browsing outage is embarrassing but not dangerous."' },
       ],
       grading: "Three clearly separated lanes, the sandbox called out explicitly on the write lane, and an explicit statement that the leaderboard is async and non-blocking.",
@@ -625,7 +653,7 @@ export const leetcode: Problem = {
       {
         heading: "Exactly-once judging and the leaderboard",
         body: [
-          "A submission carries a client-generated idempotency key so a retried network call never enqueues twice, and a Kafka consumer only commits its offset after the verdict is durably persisted, so a worker crash mid-run causes a safe redelivery-and-rejudge rather than a lost result — the idempotent write means a redelivery overwrites the same row instead of duplicating it. Status is pushed to the client over WebSocket via a per-submission Redis Pub/Sub channel, with polling as a fallback so an update is only ever delayed, never lost.",
+          "A submission carries a client-generated idempotency key so a retried network call never enqueues twice, and a Kafka consumer only commits its offset after the verdict is durably persisted, so a worker crash mid-run causes a safe redelivery-and-rejudge rather than a lost result — the idempotent write means a redelivery overwrites the same row instead of duplicating it. Status is pushed to the client over WebSocket: the Result Consumer publishes on a per-submission Redis Pub/Sub channel, and the API Gateway — which holds the client's live connection — subscribes and forwards it, with polling as a fallback so an update is only ever delayed, never lost.",
           "The contest leaderboard is a Redis sorted set for O(log N) live rank updates, scored on problems solved and penalty time, frozen for the last 5-10 minutes to prevent rank sniping. Redis is a read-optimized view, not the authority — Postgres's append-only submission log is the source of truth, and final standings are always recomputed from it after the contest closes, so a mid-contest cache restart can never corrupt the official result.",
         ],
       },

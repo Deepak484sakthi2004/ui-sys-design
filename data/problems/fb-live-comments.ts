@@ -88,9 +88,11 @@ export const fbLiveComments: Problem = {
       { from: "fanout", to: "gateway", label: "push, batched 250ms", kind: "read" },
       { from: "gateway", to: "viewer", label: "broadcast frame", kind: "read" },
       { from: "gateway", to: "scylla", label: "late-joiner backfill, last 50", kind: "read" },
+      { from: "gateway", to: "directory", label: "register on connect/disconnect", kind: "write" },
 
       { from: "ingest", to: "moderation", label: "async, non-blocking", kind: "analytics" },
       { from: "moderation", to: "kafka", label: "delete/flag event", kind: "analytics" },
+      { from: "moderation", to: "scylla", label: "mark deleted", kind: "write" },
       { from: "gateway", to: "presence", label: "join/leave events", kind: "analytics" },
     ],
     legend: [
@@ -99,6 +101,33 @@ export const fbLiveComments: Problem = {
       { kind: "analytics", text: "async · moderation and presence, never blocks fan-out" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["poster", "lb", "ingest"],
+      say: "Start with the write side: a Poster Client submits a comment through the Edge LB to a stateless Comment Ingest Service, which authenticates, rate-limits per user, and assigns a monotonic seq before anything else happens.",
+    },
+    {
+      reveal: ["kafka", "scylla"],
+      say: "Ingest publishes to that video's Kafka partition and durably persists the comment to ScyllaDB keyed by (video_id, seq). Ingestion is a normal write-heavy pipeline — the explosion is entirely on the delivery side, which we haven't drawn yet.",
+    },
+    {
+      reveal: ["fanout", "directory"],
+      say: "That's where Fanout Workers come in: they consume a video's partition, apply the display-budget sampling so we're not shipping all 10K comments/sec, and use a Shard Directory to look up which gateway nodes currently hold that video's viewers.",
+    },
+    {
+      reveal: ["gateway", "viewer"],
+      say: "Gateway nodes hold the actual WebSocket connections, about 250K each, batch incoming comments into one frame per 250ms tick, and push to Viewer Clients. A late joiner gets a ScyllaDB snapshot of the last 50 comments before subscribing to this live tree.",
+    },
+    {
+      reveal: ["moderation"],
+      say: "Moderation runs off the ingest path entirely, async and non-blocking. When it flags a comment, it marks the ScyllaDB row deleted and emits a delete event back into Kafka, which rides the exact same fan-out tree to remove it from every screen.",
+    },
+    {
+      reveal: ["presence"],
+      say: "Presence just counts join and leave events off the Gateway layer — a lightweight side signal that never sits on the fan-out path or adds latency to a comment reaching a screen.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

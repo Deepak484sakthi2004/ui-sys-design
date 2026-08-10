@@ -33,14 +33,12 @@ export const googleDocs: Problem = {
     nodes: [
       { id: "client", label: "Client", sub: "editor A", col: 1, row: 1, tone: "slate" },
       { id: "ws_gateway", label: "WS Gateway", sub: "authenticates + connects", col: 2, row: 1, tone: "slate" },
-      { id: "metadata_db", label: "Metadata Store", sub: "Spanner · ACLs & sharing", col: 3, row: 1, tone: "blue" },
-      { id: "snapshot_store", label: "Snapshot Store", sub: "latest full-doc blob", col: 4, row: 1, tone: "blue" },
       {
         id: "shard_router",
         label: "Shard Router",
         mono: "consistent hash: docId → server",
-        col: 1,
-        row: 2,
+        col: 3,
+        row: 1,
         tone: "slate",
       },
       {
@@ -48,28 +46,31 @@ export const googleDocs: Problem = {
         label: "Doc Session Server",
         sub: "in-memory OT · single writer/doc",
         mono: "transform → apply → broadcast",
-        col: 2,
-        row: 2,
+        col: 4,
+        row: 1,
         tone: "green",
       },
-      { id: "op_log", label: "Op Log", sub: "durable per-doc append log", col: 3, row: 2, tone: "blue" },
-      { id: "other_clients", label: "Collaborators", sub: "fan-out via WS", col: 4, row: 2, tone: "slate" },
-      { id: "presence", label: "Presence", sub: "cursors/selections, ephemeral", col: 5, row: 2, tone: "purple" },
+      { id: "other_clients", label: "Collaborators", sub: "fan-out via WS", col: 5, row: 1, tone: "slate" },
+      { id: "metadata_db", label: "Metadata Store", sub: "Spanner · ACLs & sharing", col: 2, row: 2, tone: "blue" },
+      { id: "snapshot_store", label: "Snapshot Store", sub: "latest full-doc blob", col: 3, row: 2, tone: "blue" },
+      { id: "op_log", label: "Op Log", sub: "durable per-doc append log", col: 4, row: 2, tone: "blue" },
+      { id: "presence", label: "Presence", sub: "cursors/selections, ephemeral", col: 3, row: 3, tone: "purple" },
       {
         id: "compactor",
         label: "Snapshot Compactor",
         sub: "op log → snapshot, ~1K ops",
-        col: 2,
+        col: 4,
         row: 3,
         tone: "orange",
       },
-      { id: "search_indexer", label: "Search Indexer", sub: "async full-text index", col: 4, row: 3, tone: "orange" },
+      { id: "search_indexer", label: "Search Indexer", sub: "async full-text index", col: 5, row: 3, tone: "orange" },
     ],
     edges: [
-      { from: "client", to: "ws_gateway", label: "open doc", kind: "read" },
+      { from: "client", to: "ws_gateway", label: "connect · ops", kind: "read" },
       { from: "ws_gateway", to: "metadata_db", label: "authz + ACL", kind: "read" },
       { from: "ws_gateway", to: "snapshot_store", label: "load latest snapshot", kind: "read" },
-      { from: "client", to: "shard_router", label: "keystroke op", kind: "write" },
+      { from: "ws_gateway", to: "op_log", label: "replay tail since snapshot", kind: "read" },
+      { from: "ws_gateway", to: "shard_router", label: "keystroke op", kind: "write" },
       { from: "shard_router", to: "session_server", label: "route to owning server", kind: "write" },
       { from: "session_server", to: "op_log", label: "append transformed op", kind: "write" },
       { from: "session_server", to: "other_clients", label: "broadcast · <100ms", kind: "write" },
@@ -84,6 +85,29 @@ export const googleDocs: Problem = {
       { kind: "analytics", text: "async side channel · presence, compaction, search — never blocks an edit" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "ws_gateway", "shard_router", "session_server"],
+      say: "One persistent WebSocket per client, terminated at the gateway. Every keystroke op gets routed by consistent hash to the single session server that owns this document — the one process allowed to assign its revision order.",
+    },
+    {
+      reveal: ["other_clients", "op_log"],
+      say: "The session server appends the transformed op to a durable per-doc log, then broadcasts it to every other collaborator in under 100ms. Durability and fan-out are the two jobs on the hot path — nothing else runs here.",
+    },
+    {
+      reveal: ["metadata_db", "snapshot_store"],
+      say: "Opening a document is a separate read path: the gateway checks ACLs against the metadata store, then loads the latest snapshot instead of replaying the doc's entire edit history.",
+    },
+    {
+      reveal: ["presence"],
+      say: "Cursors and selections ride their own throttled, ephemeral channel off the session server — never the durable op log — so a burst of mouse movement can never delay a keystroke.",
+    },
+    {
+      reveal: ["compactor", "search_indexer"],
+      say: "Off to the side, a compactor periodically folds the op log into a fresh snapshot so cold-open latency stays flat, and a search indexer keeps full-text search current. Both async, both allowed to lag, neither able to touch a live edit.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

@@ -31,9 +31,10 @@ export const instagram: Problem = {
   diagram: {
     caption: "THE WHOLE SYSTEM IN ONE PICTURE",
     nodes: [
-      { id: "client", label: "Client", col: 1, row: 2, tone: "slate" },
       { id: "cdn", label: "CDN", sub: "media edge · ~80% hit", col: 1, row: 1, tone: "green" },
+      { id: "client", label: "Client", col: 1, row: 2, tone: "slate" },
       { id: "lb", label: "API Gateway / LB", col: 2, row: 2, tone: "slate" },
+      { id: "followgraph", label: "Follow Graph", sub: "~300B edges, both directions", col: 2, row: 4, tone: "blue" },
       {
         id: "feedsvc",
         label: "Feed Service",
@@ -42,13 +43,13 @@ export const instagram: Problem = {
         row: 1,
         tone: "green",
       },
-      { id: "rediscache", label: "Redis Timeline Cache", sub: "~500M timelines · ~6TB", col: 4, row: 1, tone: "green" },
-      { id: "poststore", label: "Cassandra", sub: "post metadata + counters", col: 5, row: 1, tone: "blue" },
       { id: "postsvc", label: "Post Service", sub: "~1.2K/s avg, ~6K/s peak", col: 3, row: 3, tone: "purple" },
-      { id: "mediastore", label: "Object Storage", sub: "S3-class · originals + variants", col: 4, row: 3, tone: "blue" },
       { id: "kafka", label: "Kafka", sub: "new_post events", col: 3, row: 4, tone: "orange" },
+      { id: "rediscache", label: "Redis Timeline Cache", sub: "~500M timelines · ~6TB", col: 4, row: 1, tone: "green" },
+      { id: "mediastore", label: "Object Storage", sub: "S3-class · originals + variants", col: 4, row: 3, tone: "blue" },
       { id: "fanoutworker", label: "Fan-out Worker Pool", sub: "push, non-celebrity only", col: 4, row: 4, tone: "orange" },
-      { id: "followgraph", label: "Follow Graph", sub: "~300B edges, both directions", col: 2, row: 4, tone: "blue" },
+      { id: "poststore", label: "Cassandra", sub: "post metadata + counters", col: 5, row: 1, tone: "blue" },
+      { id: "mediaworker", label: "Media Worker Pool", sub: "derives resolutions & bitrates", col: 5, row: 4, tone: "orange" },
     ],
     edges: [
       { from: "client", to: "lb", label: "GET /feed", kind: "read" },
@@ -58,13 +59,15 @@ export const instagram: Problem = {
       { from: "feedsvc", to: "rediscache", label: "precomputed timeline · O(1)", kind: "read" },
       { from: "feedsvc", to: "poststore", label: "celebrity pull + hydrate", kind: "read" },
       { from: "client", to: "lb", label: "POST /media", kind: "write" },
+      { from: "client", to: "mediastore", label: "direct upload · pre-signed URL", kind: "write" },
       { from: "lb", to: "postsvc", kind: "write" },
-      { from: "postsvc", to: "mediastore", label: "upload original", kind: "write" },
       { from: "postsvc", to: "poststore", label: "insert post row", kind: "write" },
       { from: "postsvc", to: "kafka", label: "new_post event", kind: "write" },
       { from: "kafka", to: "fanoutworker", kind: "analytics" },
       { from: "fanoutworker", to: "followgraph", label: "paginated follower list", kind: "analytics" },
       { from: "fanoutworker", to: "rediscache", label: "push post_id, below threshold", kind: "analytics" },
+      { from: "kafka", to: "mediaworker", kind: "analytics" },
+      { from: "mediaworker", to: "mediastore", label: "writes derived variants", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · ~145K feed reads/s" },
@@ -72,6 +75,29 @@ export const instagram: Problem = {
       { kind: "analytics", text: "async fan-out & media · never blocks the upload ack" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "feedsvc", "postsvc"],
+      say: "Two stateless services behind a gateway: Feed Service handles reads, Post Service handles writes. At ~145K reads/sec vs. ~1.2K writes/sec, this is a brutally read-heavy system, so the read path is what has to be fast.",
+    },
+    {
+      reveal: ["cdn", "rediscache"],
+      say: "Reads get two caches: a CDN for media at the edge, and a Redis timeline cache holding a precomputed (post_id, score) list per user, so a feed load is an O(1) lookup instead of a live graph walk.",
+    },
+    {
+      reveal: ["poststore", "mediastore"],
+      say: "Cassandra holds near-immutable post rows plus counters; Object Storage holds the actual bytes. Uploads go client-direct to Object Storage via a pre-signed URL, never through Post Service, so a multi-megabyte file never ties up an API pod.",
+    },
+    {
+      reveal: ["kafka", "fanoutworker", "followgraph"],
+      say: "A post write drops a new_post event on Kafka and returns immediately. A Fan-out Worker Pool paginates the Follow Graph and pushes the post_id into followers' timelines — but only below a ~1M-follower threshold, so one celebrity post never floods this pipeline.",
+    },
+    {
+      reveal: ["mediaworker"],
+      say: "The same new_post event also wakes a Media Worker Pool, which derives every thumbnail, resolution, and bitrate from the already-uploaded original and writes the variants back to Object Storage — transcoding never sits between the user and their upload acknowledgment.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -92,12 +118,12 @@ export const instagram: Problem = {
       { id: "NFR-01", text: "Feed load latency, server-side", tag: "p99 < 200ms" },
       { id: "NFR-02", text: "Media time-to-first-byte from the CDN edge", tag: "p99 < 100ms" },
       { id: "NFR-03", text: "Post upload acknowledgment (before fan-out/processing complete)", tag: "p99 < 500ms" },
-      { id: "NFR-04", text: "Feed read throughput, sustained globally", tag: "150K/sec" },
-      { id: "NFR-05", text: "Post write throughput, sustained (peak burst)", tag: "1.2K/sec" },
+      { id: "NFR-04", text: "Feed read throughput, sustained globally (360K/sec peak)", tag: "145K/sec" },
+      { id: "NFR-05", text: "Post write throughput, sustained (6K/sec peak burst)", tag: "1.2K/sec" },
       { id: "NFR-06", text: "Availability (about 4.4 hrs downtime per year)", tag: "99.95%" },
       { id: "NFR-07", text: "Fan-out completion, post to appearing in a follower's feed (non-celebrity)", tag: "< 5s" },
       { id: "NFR-08", text: "Durability of uploaded media originals and post metadata", tag: "zero loss" },
-      { id: "NFR-09", text: "Read-to-write ratio that anchors the whole design", tag: "100:1" },
+      { id: "NFR-09", text: "Read-to-write ratio that anchors the whole design", tag: "125:1" },
     ],
   },
 
@@ -108,11 +134,11 @@ export const instagram: Problem = {
       title: "Sizing: the five numbers that drive everything",
       body: [
         "Before picking a fan-out strategy, quantify the traffic it has to survive. 500M DAU loading their feed roughly 25 times a day is about 12.5B feed reads/day, ~145K/sec average, spiking near 360K/sec in evening peak windows. 100M posts/day is only ~1,150/sec average — the write side looks tiny by comparison.",
-        "But writes don't stay tiny once you decide to precompute feeds. If every post is pushed into every follower's timeline at write time, and the average account has ~150 followers, then 100M posts/day becomes ~15B fan-out writes/day — about 165K/sec, the same order of magnitude as the entire read path. That single fact, that naive push amplifies writes up to read-path scale, is the reason this system can't use one fan-out mechanism for every account.",
+        "But writes don't stay tiny once you decide to precompute feeds. If every post is pushed into every follower's timeline at write time, and the average account has ~150 followers, then 100M posts/day becomes ~15B fan-out writes/day — about 174K/sec, the same order of magnitude as the entire read path. That single fact, that naive push amplifies writes up to read-path scale, is the reason this system can't use one fan-out mechanism for every account.",
       ],
       bullets: [
         { lead: "100M posts/day", text: "≈ 1,150/sec average, ~6K/sec at peak (photo/video bursts overlapping across time zones)." },
-        { lead: "150 avg followers", text: "means naive push fans a single post out to ~150 timelines, so total fan-out volume is ~165K writes/sec — the same order as the whole read path." },
+        { lead: "150 avg followers", text: "means naive push fans a single post out to ~150 timelines, so total fan-out volume is ~174K writes/sec — the same order as the whole read path." },
         { lead: "500M DAU, ~25 loads/day", text: "≈ 145K feed reads/sec average, peaking near 360K/sec." },
         { lead: "Read:write ≈ 125:1", text: "on feed reads vs. posts created — this is a brutally read-heavy system, but push-based fan-out quietly turns part of the read cost into write cost." },
       ],
@@ -120,11 +146,11 @@ export const instagram: Problem = {
       pictureRows: [
         { label: "Posts created", value: "~1.2K/s avg, ~6K/s peak", tone: "neutral" },
         { label: "Feed reads", value: "~145K/s avg, ~360K/s peak", tone: "used" },
-        { label: "Naive push fan-out writes", value: "~165K/s avg — same order as reads", tone: "bad" },
+        { label: "Naive push fan-out writes", value: "~174K/s avg — same order as reads", tone: "bad" },
       ],
       remember: {
         problem: "How big is this system really, and where does the load concentrate?",
-        solution: "500M DAU, 100M posts/day, ~145K feed reads/sec, and naive fan-out alone would add ~165K writes/sec — write amplification on the same order as the entire read path.",
+        solution: "500M DAU, 100M posts/day, ~145K feed reads/sec, and naive fan-out alone would add ~174K writes/sec — write amplification on the same order as the entire read path.",
         why: "Every post is read by ~150 followers on average, so pushing it to every timeline multiplies write volume by the follower count.",
         tradeoff: "Precomputing feeds (push) makes reads cheap but amplifies writes; computing feeds live (pull) makes writes cheap but every read fans out across the follow graph instead.",
         failure: "Push-everywhere for every account means one celebrity post with 100M followers triggers 100M writes in seconds.",
@@ -353,7 +379,7 @@ export const instagram: Problem = {
         items: [
           "2B registered users, 500M DAU, 100M posts/day (~1.2K/s avg, ~6K/s peak)",
           "~145K feed reads/sec avg, ~360K/s peak (500M DAU × ~25 loads/day)",
-          "Naive push-everywhere fan-out ≈ 165K writes/sec — same order as the entire read path",
+          "Naive push-everywhere fan-out ≈ 174K writes/sec — same order as the entire read path",
           "Follow graph: ~300B edges, denormalized both directions",
           "Timeline cache: ~500M active timelines × ~800 capped IDs ≈ 6TB, sharded by user_id",
           "Media: ~300TB/day new derived+original media, ~110PB/year",
@@ -397,7 +423,7 @@ export const instagram: Problem = {
         { kind: "ASK", text: '**How big is the follow graph, and is it skewed?** Land on "average ~150 followers, but a long tail of celebrity accounts with 10M-100M+ followers". Write **"skewed follow graph"** — this single fact is what the whole design hangs on.' },
         { kind: "SAY", text: 'Propose the latency target: **"feed load p99 < 200ms"**, **"media edge TTFB p99 < 100ms"**, **"upload ack p99 < 500ms"**. Wait for a nod.' },
         { kind: "SAY", text: 'State scope. In: "feed generation", "the follow graph", "media upload/serving", "likes and comments". Out: "stories", "DMs", "discovery/explore ranking internals", "auth". "Happy to come back to any of those."' },
-        { kind: "WRITE", text: 'Do the amplification math out loud: **"100M posts × ~150 avg followers ≈ 15B fan-out writes/day ≈ 165K/s"** — roughly the same order as the entire read path. Write it down; it\'s the reason a naive design doesn\'t survive contact with a celebrity account.' },
+        { kind: "WRITE", text: 'Do the amplification math out loud: **"100M posts × ~150 avg followers ≈ 15B fan-out writes/day ≈ 174K/s"** — roughly the same order as the entire read path. Write it down; it\'s the reason a naive design doesn\'t survive contact with a celebrity account.' },
       ],
       grading: "Senior judgment: are the read/write numbers and the skew of the follow graph on the board before any boxes are drawn, and is the amplification math done out loud rather than asserted?",
     },

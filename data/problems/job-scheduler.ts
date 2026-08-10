@@ -42,7 +42,7 @@ export const jobScheduler: Problem = {
         row: 1,
         tone: "blue",
       },
-      { id: "etcd", label: "etcd", sub: "shard leases · leader lease", col: 1, row: 2, tone: "orange" },
+      { id: "etcd", label: "etcd", sub: "shard leases · per-node heartbeat", col: 1, row: 2, tone: "orange" },
       {
         id: "ticker",
         label: "Scheduler Nodes",
@@ -67,7 +67,7 @@ export const jobScheduler: Problem = {
       { from: "ticker", to: "jobstore", label: "advance next_run_at (cron)", kind: "write" },
       { from: "ticker", to: "kafka", label: "publish trigger · idempotency key", kind: "write" },
       { from: "kafka", to: "worker", label: "consume · at-least-once", kind: "write" },
-      { from: "worker", to: "redis", label: "dedupe check", kind: "read" },
+      { from: "worker", to: "redis", label: "dedupe check · SETNX", kind: "write" },
       { from: "worker", to: "target", label: "execute", kind: "write" },
       { from: "worker", to: "exechistory", label: "async · write execution record", kind: "analytics" },
       { from: "worker", to: "dlq", label: "after N retries", kind: "analytics" },
@@ -79,6 +79,29 @@ export const jobScheduler: Problem = {
       { kind: "analytics", text: "async · execution history and DLQ, never blocks dispatch" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "api", "jobstore"],
+      say: "Start with the write path: a client creates or updates a job, the API validates the cron expression and timezone, and the row lands in the job store. Nothing about firing happens synchronously here.",
+    },
+    {
+      reveal: ["etcd", "ticker"],
+      say: "10M jobs is too much for one poller, so shard by job_id hash and give each scheduler node an etcd lease on its shard range. The lease is coarse ownership — the actual due-job claim still has to happen atomically against the job store.",
+    },
+    {
+      reveal: ["kafka", "worker", "target"],
+      say: "A claimed job publishes a trigger to Kafka, keyed by job_id, and a separately-scaled worker pool consumes it and calls the target. Decoupling claim from execution means a slow webhook never stalls the scheduler.",
+    },
+    {
+      reveal: ["redis"],
+      say: "Kafka only promises at-least-once delivery, so before executing, the worker does a Redis SETNX on job_id plus scheduled_run_timestamp. That's what turns redelivery into effectively-once.",
+    },
+    {
+      reveal: ["exechistory", "dlq"],
+      say: "Two things happen off the hot path: every execution gets written to history asynchronously, and a job that exhausts its retries lands in a dead-letter queue with alerting. Neither one ever blocks a dispatch.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -177,8 +200,8 @@ export const jobScheduler: Problem = {
       ],
       pictureTitle: "DB reads vs. trigger precision",
       pictureRows: [
-        { label: "Poll DB every second", value: "830 req/sec DB load at peak", tone: "bad" },
-        { label: "Sweep every 60s + in-memory wheel", value: "same sub-second precision, ~1/60th the DB load", tone: "good" },
+        { label: "Poll DB every second, 256 shards", value: "~256 queries/sec DB load", tone: "bad" },
+        { label: "Sweep every 60s + in-memory wheel", value: "~4 queries/sec, same sub-second precision (60x less DB load)", tone: "good" },
       ],
       remember: {
         problem: "Sub-second trigger precision without polling the DB every second per shard.",
@@ -352,7 +375,7 @@ export const jobScheduler: Problem = {
         heading: "NUMBERS",
         icon: "🔢",
         items: [
-          "10M scheduled jobs stored, 50K triggers/min sustained peak",
+          "10M scheduled jobs stored, 50K triggers/min sustained peak, 20:1 status-read to schedule-write ratio",
           "Scheduling skew: p99 < 5s from scheduled time to trigger publish",
           "Shard count: ~256 shards over job_id hash, ~40K jobs/shard",
           "Timing wheel: 5-min lookahead, resynced every 60s",

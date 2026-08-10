@@ -36,7 +36,7 @@ export const adClickAggregator: Problem = {
       {
         id: "ingest",
         label: "Click Ingestion Service",
-        sub: "stateless · assigns click_id",
+        sub: "stateless · validates client click_id",
         col: 3,
         row: 1,
         tone: "green",
@@ -77,6 +77,29 @@ export const adClickAggregator: Problem = {
       { kind: "read", text: "dashboard reads · approximate and billing-exact" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "ingest", "kafka"],
+      say: "Start with the write skeleton: a click posts through a load balancer to a stateless Ingestion Service that acks straight into Kafka. Nothing here waits on anything downstream — Kafka is a durable buffer, not a synchronous dependency.",
+    },
+    {
+      reveal: ["redis"],
+      say: "Clicks map straight to advertiser billing, so before the ack, check the client-generated click_id against Redis with a 10-minute TTL — a resend within that window is a no-op instead of a duplicate.",
+    },
+    {
+      reveal: ["flink", "druid_rt"],
+      say: "Off that same Kafka topic, Flink keys by ad_id and aggregates 1-minute tumbling windows, watermarked 5 minutes behind, into a real-time Druid datasource. That's the under-1-minute dashboard number — provisional by construction, not final.",
+    },
+    {
+      reveal: ["s3", "spark", "druid_hist"],
+      say: "Every raw click is also archived to S3. A nightly Spark job re-reads the full immutable log with no time pressure, applies final dedup and fraud rules, and writes reconciled counts into a separate historical Druid datasource — this is the number that actually goes on the invoice.",
+    },
+    {
+      reveal: ["dashboard"],
+      say: "The advertiser dashboard reads both stores depending on the question: fast-but-provisional from Druid real-time for the last hour, billing-exact from Druid historical for anything invoice-facing — and the UI has to make it obvious which one a given number came from.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -196,7 +219,7 @@ export const adClickAggregator: Problem = {
         "The batch path re-reads the full raw click log from S3 the next day, applies the final dedup and fraud rules deterministically over the complete dataset (no lateness bound, no watermark trade-off), and writes the result to a separate 'historical' Druid datasource. That reconciled number — not the real-time one — is what actually appears on the invoice.",
       ],
       bullets: [
-        { lead: "Real-time (Druid real-time)", text: "fed by Flink, fresh under 1 minute, uses HyperLogLog for approximate unique-click counts where exactness isn't worth the memory cost." },
+        { lead: "Real-time (Druid real-time)", text: "fed by Flink, fresh under 1 minute. The click total itself is an exact rolling sum of deduped events — it's provisional, not probabilistic, bounded by the 5-minute watermark so a late straggler can still nudge it upward. Dimension breakdowns like distinct devices per ad use HyperLogLog sketches, since exact unique-counting at that cardinality isn't worth the memory." },
         { lead: "Batch (Druid historical)", text: "fed by a nightly Spark job over the immutable S3 log, exact dedup and final fraud filtering, no time pressure — this is the number that generates the invoice." },
         { lead: "Say which is which", text: "the dashboard should visibly label the real-time number as an estimate and only firm it up once the T+1 reconciliation lands — advertisers should never mistake one for the other." },
       ],
@@ -290,7 +313,7 @@ export const adClickAggregator: Problem = {
         steps: [
           { label: "Client", note: "browser or app SDK fires a click" },
           { label: "Load Balancer", note: "routes to a nearby pod" },
-          { label: "Ingestion Service", note: "stateless, assigns click_id" },
+          { label: "Ingestion Service", note: "stateless, validates client-generated click_id" },
           { label: "Redis", note: "idempotency check, 10-min TTL" },
           { label: "Kafka", note: "ack, raw_clicks partitioned by ad_id" },
         ],
@@ -317,7 +340,7 @@ export const adClickAggregator: Problem = {
         steps: [
           { label: "Advertiser Dashboard", note: "requests clicks by ad/campaign/time range" },
           { label: "Query API", note: "stateless" },
-          { label: "Druid (real-time)", note: "last hour, approximate, HLL for uniques" },
+          { label: "Druid (real-time)", note: "last hour, provisional (watermark-bound); HLL only for distinct-device breakdowns" },
           { label: "Druid (historical)", note: "T+1, billing-exact" },
         ],
       },
@@ -343,7 +366,7 @@ export const adClickAggregator: Problem = {
           "Kafka as a durable buffer, decoupling bursty ingest from steady aggregation",
           "Flink for stateful, exactly-once windowed aggregation, not a plain consumer loop",
           "Druid for OLAP rollups and bitmap indexes, not Postgres UPDATE counters",
-          "Two-tier accuracy: real-time approximate (Druid + HLL) vs T+1 exact (Spark reconciliation)",
+          "Two-tier accuracy: real-time provisional/watermark-bound (Druid) vs T+1 exact (Spark reconciliation); HLL only for distinct-device breakdowns, never the click total",
           "Redis idempotency key for client-side dedup; Flink checkpointing for pipeline-side dedup",
           "Salted key (ad_id#shard) + combine stage for viral-ad hot partitions",
         ],
@@ -586,7 +609,7 @@ export const adClickAggregator: Problem = {
       {
         heading: "Two-tier accuracy: the resolution, not an afterthought",
         body: [
-          "Freshness and exactness are in tension: making the streaming path wait long enough to guarantee completeness would sacrifice the sub-minute freshness that makes it useful for a live dashboard. So the design runs two pipelines deliberately. The streaming path (Flink → Druid real-time) is fast but provisional, using HyperLogLog for approximate unique counts where exactness isn't worth the memory. The batch path (S3 → Spark → Druid historical) re-reads the complete, immutable raw log the next day with no time pressure, applying final deterministic dedup and fraud rules — its output is the number that actually generates the invoice.",
+          "Freshness and exactness are in tension: making the streaming path wait long enough to guarantee completeness would sacrifice the sub-minute freshness that makes it useful for a live dashboard. So the design runs two pipelines deliberately. The streaming path (Flink → Druid real-time) is fast but provisional — its click totals are an exact rolling sum of deduped events, just not yet complete, since the watermark can still let a late straggler in after the number was first shown. HyperLogLog sketches are reserved for secondary distinct-device breakdowns, never for the click total itself, since the invoice depends on every click counting, not on how many distinct people clicked. The batch path (S3 → Spark → Druid historical) re-reads the complete, immutable raw log the next day with no time pressure, applying final deterministic dedup and fraud rules — its output is the number that actually generates the invoice.",
           "This split has a UI consequence, not just a backend one: the dashboard must visibly label the real-time number as an estimate, or advertisers will dispute an invoice that doesn't match the live number they watched earlier.",
         ],
       },

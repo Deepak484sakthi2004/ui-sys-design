@@ -46,7 +46,7 @@ export const strava: Problem = {
       },
       { id: "blob", label: "S3", sub: "raw file + encoded polyline", col: 3, row: 2, tone: "blue" },
       { id: "activity_db", label: "Activity DB", sub: "Cassandra · by athlete_id", col: 4, row: 2, tone: "blue" },
-      { id: "kafka", label: "Kafka", sub: "activity.created", col: 5, row: 2, tone: "orange" },
+      { id: "kafka", label: "Kafka", sub: "activity.created", col: 2, row: 3, tone: "orange" },
       {
         id: "matcher",
         label: "Segment Matcher",
@@ -56,13 +56,23 @@ export const strava: Problem = {
         row: 3,
         tone: "orange",
       },
-      { id: "fanout", label: "Fan-out Workers", sub: "timeline + heatmap", col: 4, row: 3, tone: "orange" },
+      { id: "fanout", label: "Fan-out Workers", sub: "below follower threshold", col: 4, row: 3, tone: "orange" },
+      {
+        id: "heatmap",
+        label: "Heatmap Job",
+        sub: "Spark · daily-weekly batch",
+        mono: "opt-in + redact → tile pyramid → CDN",
+        col: 5,
+        row: 3,
+        tone: "orange",
+      },
     ],
     edges: [
       { from: "client", to: "feed_svc", label: "GET /feed", kind: "read" },
       { from: "feed_svc", to: "feed_cache", label: "cached timeline", kind: "read" },
-      { from: "feed_cache", to: "activity_db", label: "miss · hydrate", kind: "read" },
+      { from: "feed_cache", to: "activity_db", label: "miss · rebuild from followees", kind: "read" },
       { from: "feed_svc", to: "leaderboard", label: "segment leaderboard", kind: "read" },
+      { from: "feed_svc", to: "activity_db", label: "live merge · celebrities followed", kind: "read" },
       { from: "client", to: "upload_svc", label: "POST /activities", kind: "write" },
       { from: "upload_svc", to: "blob", label: "raw file + polyline", kind: "write" },
       { from: "upload_svc", to: "activity_db", label: "insert activity", kind: "write" },
@@ -73,6 +83,7 @@ export const strava: Problem = {
       { from: "matcher", to: "activity_db", label: "write segment efforts", kind: "analytics" },
       { from: "kafka", to: "fanout", label: "async", kind: "analytics" },
       { from: "fanout", to: "feed_cache", label: "push to follower timelines", kind: "analytics" },
+      { from: "heatmap", to: "blob", label: "read opt-in, redacted traces", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · feed + leaderboard views" },
@@ -80,6 +91,29 @@ export const strava: Problem = {
       { kind: "analytics", text: "async pipeline · segment matching, leaderboards, fan-out, heatmap — never blocks the upload response" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "upload_svc", "feed_svc", "activity_db"],
+      say: "Two stateless services around one durable store: Upload Service writes an activity row, Feed Service reads it back. This is the skeleton before any caching or matching exists.",
+    },
+    {
+      reveal: ["feed_cache", "leaderboard"],
+      say: "Reads outnumber writes about 100 to 1, so two Redis layers sit in front of Cassandra: cached feed pages for sub-200ms reads, and per-segment sorted sets for sub-50ms leaderboard lookups.",
+    },
+    {
+      reveal: ["blob"],
+      say: "A GPS trace is too big to put in a database row. The compressed polyline and the original raw file both live in S3, referenced by key from the activity row in Cassandra.",
+    },
+    {
+      reveal: ["kafka", "matcher", "fanout"],
+      say: "The upload response returns the moment the Kafka event lands — matching and fan-out haven't started yet. Off that event: the Segment Matcher narrows 30M segments to a few hundred with an S2 index and writes efforts to the leaderboard; Fan-out Workers push the activity into followers' cached timelines below the follower threshold. Neither one delays the response.",
+    },
+    {
+      reveal: ["heatmap"],
+      say: "A separate, slower path: a periodic Spark job reads opted-in, privacy-redacted traces straight from S3 and aggregates them into the global heatmap — deliberately not real-time, since one activity is statistically invisible at that scale.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -101,7 +135,7 @@ export const strava: Problem = {
       { id: "NFR-02", text: "Segment leaderboard read latency, server-side", tag: "p99 < 50ms" },
       { id: "NFR-03", text: "Upload finish → segment leaderboard updated", tag: "p99 < 30s" },
       { id: "NFR-04", text: "Upload finish → visible in direct followers' feeds", tag: "p99 < 10s" },
-      { id: "NFR-05", text: "Sustained activity-upload throughput, weekend-morning peak", tag: "800/sec" },
+      { id: "NFR-05", text: "Activity-upload throughput at the Saturday-morning peak (~115/sec average)", tag: "800/sec" },
       { id: "NFR-06", text: "Availability (about 4.4 hrs downtime per year)", tag: "99.95%" },
       { id: "NFR-07", text: "Durability: no data loss for uploaded GPS traces", tag: "zero loss" },
       { id: "NFR-08", text: "Read-to-write ratio that anchors the design (feed + leaderboard reads vs. uploads)", tag: "100:1" },
@@ -174,7 +208,7 @@ export const strava: Problem = {
         "The genuine trap is treating Redis as authoritative. It is fast and in-memory, which means it is also the thing that can lose data on a node failure. Every effort is written durably to Cassandra first (or in the same transaction path); Redis sorted sets are a rebuildable index over that durable data, not the record of truth — exactly the same discipline as never trusting a cache to be the only copy of a URL mapping.",
       ],
       bullets: [
-        { lead: "One effort, several ZADDs", text: "overall, gender, age-group, and time-window leaderboards each get their own sorted set, so a confirmed effort fans out to roughly 5-8 writes, not one." },
+        { lead: "One effort, several ZADDs", text: "overall, gender, age-group, and time-window leaderboards each get their own sorted set, so a confirmed effort fans out to roughly 6-8 writes, not one." },
         { lead: "KOM/QOM", text: "is just ZRANGE segment:{id}:overall 0 0 — the crown is a query, not a separately maintained field." },
         { lead: "Recompute on segment edit", text: "if a segment's definition changes (rare, but happens — a road closure reroutes it), every leaderboard for that segment must be rebuilt from the durable effort records, which is only possible because Redis was never the source of truth." },
         { lead: "Hot segments", text: "a famous climb ridden by thousands on a sunny Saturday concentrates writes on a handful of sorted-set keys; single-threaded Redis comfortably absorbs this (millions of ops/sec on a single instance), so this is a non-issue compared to the fan-out cost." },
@@ -322,12 +356,13 @@ export const strava: Problem = {
         kind: "read",
         title: "READ · FEED + LEADERBOARD · P99 < 200MS",
         summary:
-          "Opening the app asks for a feed page and, inside an activity, a segment leaderboard. Both are served from Redis first; the feed falls back to Cassandra only on a cold cache.",
+          "Opening the app asks for a feed page and, inside an activity, a segment leaderboard. The precomputed timeline is served from Redis first; any celebrity accounts followed are merged in live, and the feed falls back to Cassandra only on a cold cache.",
         steps: [
           { label: "Client", note: "opens feed or an activity" },
           { label: "Feed Service", note: "stateless" },
-          { label: "Redis Timeline", note: "cached feed page" },
-          { label: "Activity DB (miss)", note: "Cassandra, by athlete_id" },
+          { label: "Redis Timeline", note: "cached, precomputed feed page" },
+          { label: "Activity DB (miss)", note: "cold cache: rebuild from followees' activities_by_athlete" },
+          { label: "Activity DB (celebrities)", note: "live merge of celebrity accounts followed, every read" },
           { label: "Redis Leaderboards", note: "ZRANGE per segment, per dimension" },
         ],
       },
@@ -353,8 +388,8 @@ export const strava: Problem = {
           { label: "Kafka", note: "activity.created" },
           { label: "Segment Matcher", note: "S2 candidates → corridor match on the true trace" },
           { label: "Redis Leaderboards + Activity DB", note: "ZADD per dimension, durable effort write" },
-          { label: "Fan-out Workers", note: "push-on-write below threshold, merge-on-read above" },
-          { label: "Heatmap batch (Spark)", note: "periodic, opt-in, redacted input only" },
+          { label: "Fan-out Workers", note: "push-on-write below follower threshold; celebrities are merged live on the read path instead" },
+          { label: "Heatmap batch (Spark)", note: "periodic, reads opt-in + redacted traces straight from S3" },
         ],
       },
     ],
@@ -431,12 +466,12 @@ export const strava: Problem = {
       n: 3,
       title: "High-Level Design (draw the three lanes)",
       minutes: 10,
-      goal: "One diagram, three lanes: read (feed/leaderboard), write (upload), async (matching, ranking, fan-out, heatmap).",
+      goal: "One diagram, three lanes: read (feed/leaderboard), write (upload), async off Kafka (matching, ranking, fan-out). The heatmap job comes later, deliberately off to the side.",
       why: "The interviewer is checking that you understand these three paths have different SLAs and therefore different infrastructure — an upload response must never wait on segment matching or fan-out.",
       steps: [
         { kind: "DRAW", text: 'Draw the **write path**: Client → Upload Service → S3 (blob) + Activity DB (metadata) → Kafka. Label it **"upload response returns once metadata + Kafka event land — matching hasn\'t started yet"**.' },
         { kind: "DRAW", text: 'Draw the **async lane** off Kafka: → Segment Matcher (S2 candidates → corridor match) → Redis Leaderboards + Activity DB; and a parallel → Fan-out Workers → Redis Timeline. Label **"never blocks the upload response"**.' },
-        { kind: "DRAW", text: 'Draw the **read path**: Client → Feed Service → Redis Timeline (miss → Activity DB) and → Redis Leaderboards. Label with the latency budgets: **"sub-200ms feed"**, **"sub-50ms leaderboard"**.' },
+        { kind: "DRAW", text: 'Draw the **read path**: Client → Feed Service → Redis Timeline (miss → Activity DB, rebuilt from followees) and → Redis Leaderboards. Add a second arrow straight from Feed Service → Activity DB for **"live merge: celebrities followed"** — that one runs on every read, cache or not. Label with the latency budgets: **"sub-200ms feed"**, **"sub-50ms leaderboard"**.' },
         { kind: "SAY", text: '"Three lanes because they have three SLAs: upload is tier-1 and must be fast and durable; matching/fan-out is tier-2, async, with a 30-second budget; the feed read path is tier-1 for latency but entirely served from cache."' },
       ],
       grading: "Three clearly separated lanes with the async lane explicitly decoupled from the upload response via Kafka, and latency budgets on the arrows, not just box names.",
@@ -477,7 +512,7 @@ export const strava: Problem = {
       why: "Privacy zones are the easiest thing to get subtly wrong in this design — the interviewer is listening for whether you volunteer the redaction-order reasoning, not just react when asked about privacy.",
       steps: [
         { kind: "SAY", text: '"One thing I want to flag before we close: segment matching always runs on the true, unredacted trace — otherwise users lose credit for segments near home. Redaction happens exactly once, at the boundary where a trace becomes visible to anyone but the owner: public map, feed card, heatmap input."' },
-        { kind: "SAY", text: '"The heatmap is a periodic batch job over opted-in, already-redacted traces — one activity is statistically invisible at that scale, so there\'s no real-time requirement there."' },
+        { kind: "DRAW", text: 'Add one small box off S3, not off Kafka: **"Heatmap Job (Spark) reads opt-in, redacted traces directly from the blob store"** → static tile pyramid → CDN. Say: "The heatmap is a periodic batch job over opted-in, already-redacted traces — one activity is statistically invisible at that scale, so there\'s no real-time requirement there."' },
         { kind: "SAY", text: 'Push back where useful: "Do we need global leaderboards, or just friends-and-following leaderboards? That changes whether hot-segment write concentration matters at all."' },
         { kind: "SAY", text: 'Close in one sentence: "Upload is a fast, durable write; everything expensive — segment matching, leaderboards, feed fan-out, the heatmap — runs async off Kafka. With more time I\'d cover the beacon live-tracking path and device-sync webhooks."' },
       ],
@@ -551,6 +586,7 @@ export const strava: Problem = {
       "Comparing every uploaded trace against all 30M segments with no geospatial index — this doesn't scale past a demo.",
       "Treating Redis leaderboards as the source of truth with no durable write behind them, so a Redis node failure permanently loses effort history.",
       "One fan-out strategy for every account, so a single celebrity post triggers millions of synchronous timeline writes.",
+      "Treating the Redis Timeline as a second source of truth instead of a cache — a normal account's feed is always rebuildable by re-merging the followees' own activities_by_athlete partitions.",
       "Redacting privacy zones before segment matching, so users silently lose credit for real segments near their home.",
       "Redacting privacy zones inconsistently — public map is clipped but the heatmap or a CDN-cached tile isn't, leaking the address anyway.",
       "Putting segment matching or feed fan-out on the upload response path, so a slow matcher makes every upload feel slow.",

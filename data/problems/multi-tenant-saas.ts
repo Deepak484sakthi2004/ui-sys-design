@@ -47,9 +47,17 @@ export const multiTenantSaas: Problem = {
       { id: "redis", label: "Redis", sub: "tenant-namespaced keys", col: 4, row: 1, tone: "green" },
       { id: "pooled_db", label: "Pooled Postgres", sub: "shared schema · RLS · long tail", col: 5, row: 1, tone: "blue" },
       { id: "silo_db", label: "Siloed Postgres", sub: "dedicated · whale tenants", col: 5, row: 2, tone: "blue" },
-      { id: "onboarding", label: "Onboarding Service", sub: "provisions tenant + schema/DB", col: 2, row: 3, tone: "purple" },
-      { id: "kafka", label: "Kafka", sub: "usage & audit events", col: 3, row: 3, tone: "orange" },
-      { id: "metering", label: "Metering / Billing", sub: "per-tenant usage rollups", col: 4, row: 3, tone: "orange" },
+      {
+        id: "onboarding",
+        label: "Onboarding Service",
+        sub: "provisions tenant + schema/DB",
+        mono: "siloed: claims from a pre-warmed standby DB pool",
+        col: 2,
+        row: 3,
+        tone: "purple",
+      },
+      { id: "kafka", label: "Kafka", sub: "usage & audit events", col: 3, row: 4, tone: "orange" },
+      { id: "metering", label: "Metering / Billing", sub: "per-tenant usage rollups", col: 4, row: 4, tone: "orange" },
     ],
     edges: [
       { from: "client", to: "gateway", kind: "read" },
@@ -72,6 +80,29 @@ export const multiTenantSaas: Problem = {
       { kind: "analytics", text: "usage metering · async, at-least-once, funds the bill" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "app", "pooled_db"],
+      say: "A stateless App Service behind an API Gateway that resolves tenant_id from the subdomain or JWT before anything else happens. Every pooled tenant's rows live in one shared Postgres schema behind it — that's where the multi-tenancy problem actually starts.",
+    },
+    {
+      reveal: ["limiter", "directory"],
+      say: "Two guardrails sit between the gateway and the data: a per-tenant token-bucket limiter so one tenant's spike can't starve another, and a Tenant Directory that resolves tenant_id to its shard, tier, and region before a query ever runs.",
+    },
+    {
+      reveal: ["redis", "silo_db"],
+      say: "Redis caches tenant-namespaced reads in front of Postgres. And because tenant size follows a power law, the long tail pools on shared shards while the roughly 100 whale tenants each get a dedicated Siloed Postgres instance.",
+    },
+    {
+      reveal: ["onboarding"],
+      say: "The Onboarding Service registers a new tenant in the directory, then either inserts its rows into a pooled shard or claims a database from a pre-warmed standby pool for a siloed tenant — both paths land under 30 seconds.",
+    },
+    {
+      reveal: ["kafka", "metering"],
+      say: "Every request also drops a usage event into Kafka after it completes. Unlike best-effort click analytics, metering can't drop events — a missed one undercounts an invoice — so it's at-least-once with idempotent aggregation, still off the hot path.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -112,7 +143,7 @@ export const multiTenantSaas: Problem = {
       bullets: [
         { lead: "Pure database-per-tenant", text: "gives every tenant a dedicated database. Strong isolation, but 50,000 databases to patch, monitor, and back up individually is an operational disaster, and most small tenants use under 1% of a dedicated DB's capacity. Rejected for the long tail." },
         { lead: "Pure shared everything", text: "puts every tenant in one shared database. A whale tenant's 20M-row table sits next to a 3-person startup's 200-row table on the same shard, so the whale's backup, vacuum, and traffic pattern degrades every small neighbor. Rejected for whales." },
-        { lead: "Hybrid: pooled + siloed tiers", text: "pool the long tail behind shared, RLS-enforced Postgres shards, and give the small number of whale tenants their own dedicated database. Infra cost tracks the actual power-law shape of the tenant base instead of one size fitting none. Winner." },
+        { lead: "Hybrid: pooled + siloed tiers", text: "pool the long tail behind shared, RLS-enforced Postgres shards, and give the small number of whale tenants their own dedicated database, claimed at signup from a small pre-warmed standby pool rather than provisioned from scratch — that's what keeps both tiers inside the same <30s onboarding bar. Infra cost tracks the actual power-law shape of the tenant base instead of one size fitting none. Winner." },
       ],
       pictureTitle: "Where does the data actually live?",
       pictureCaption: "~100 whale tenants get dedicated DBs · ~49,900 pooled tenants share RLS-enforced shards",
@@ -134,12 +165,12 @@ export const multiTenantSaas: Problem = {
       n: 2,
       title: "Isolation models for the pooled tier: kill two, defend one",
       body: [
-        "Inside the pooled tier, thousands of tenants share the same Postgres shard. There are three classic ways to structure that sharing. Put them on the board and rule two out before committing to the third — the interviewer wants to see you've felt the operational cost of each, not just named them.",
+        "Inside the pooled tier, roughly a hundred tenants share the same Postgres shard. There are three classic ways to structure that sharing. Put them on the board and rule two out before committing to the third — the interviewer wants to see you've felt the operational cost of each, not just named them.",
       ],
       bullets: [
         { lead: "Database-per-tenant", text: "already ruled out in the sizing step for the long tail — strongest isolation, but 50,000 databases is unmanageable at this scale. Reserved for whale tenants only." },
         { lead: "Schema-per-tenant", text: "one Postgres schema per tenant inside a shared database — namespaced tables, no cross-tenant query is even possible. Looks attractive, but Postgres catalog bloat past roughly 10,000 schemas slows the planner and pg_dump, and a single migration means running the same DDL 50,000 times. Rejected." },
-        { lead: "Shared schema + tenant_id column", text: "one set of tables for everyone, every row carries a tenant_id, every index leads with it. A migration runs exactly once. Winner for the pooled tier — but now the isolation guarantee has moved from 'the database structurally can't see the other tenant's table' to 'every single query must remember to filter by tenant_id.' That shift is the vulnerability the next teardown closes." },
+        { lead: "Shared schema + tenant_id column", text: "one set of tables for everyone, every row carries a tenant_id, every index leads with it. One migration definition rolls out shard by shard, not tenant by tenant. Winner for the pooled tier — but now the isolation guarantee has moved from 'the database structurally can't see the other tenant's table' to 'every single query must remember to filter by tenant_id.' That shift is the vulnerability the next teardown closes." },
       ],
       pictureTitle: "Three isolation models, one survivor",
       pictureRows: [
@@ -150,7 +181,7 @@ export const multiTenantSaas: Problem = {
       remember: {
         problem: "Which isolation model fits tens of thousands of shared-tier tenants in one database?",
         solution: "Shared schema, every table carries a tenant_id column, indexes lead with it.",
-        why: "It's the only option where a migration runs once instead of once per tenant, and it fits the power-law shape from teardown 1.",
+        why: "It's the only option where a migration is defined once and rolled out shard by shard instead of tenant by tenant, and it fits the power-law shape from teardown 1.",
         tradeoff: "Correctness now depends on every query filtering by tenant_id correctly — a much weaker guarantee than schema or database separation.",
         failure: "A single missed WHERE clause, ORM bug, or hand-written report query can return another tenant's rows.",
         mitigation: "Don't rely on application discipline — enforce the filter at the database layer with Row-Level Security (next teardown).",
@@ -216,7 +247,7 @@ export const multiTenantSaas: Problem = {
       n: 5,
       title: "Sharding and the tenant directory",
       body: [
-        "The pooled tier is split across many Postgres shards, each holding thousands of tenants. A Tenant Directory maps tenant_id to {shard, tier, region}, and every request does one cached lookup before it even knows which cluster to talk to. New tenants land on the least-loaded shard, and when a shard gets hot, a subset of its tenants — not the whole database — gets moved to a new one.",
+        "The pooled tier is split across roughly 500 Postgres shards, each holding on the order of a hundred tenants. A Tenant Directory maps tenant_id to {shard, tier, region}, and every request does one cached lookup before it even knows which cluster to talk to. New tenants land on the least-loaded shard, and when a shard gets hot, a subset of its tenants — not the whole database — gets moved to a new one.",
       ],
       bullets: [
         { lead: "Tenant Directory", text: "a small, heavily-cached table {tenant_id → shard_id, tier, region}; a directory lookup is on the critical path of every request, so it must be cache-hit almost always." },
@@ -249,17 +280,17 @@ export const multiTenantSaas: Problem = {
         { lead: "Expand", text: "add the new column as nullable, or the new table alongside the old one. This deploy is safe because nothing reads the new shape yet." },
         { lead: "Migrate / backfill", text: "batch-backfill existing rows, rate-limited per shard so the backfill job doesn't itself become a noisy neighbor on the very shards it's touching." },
         { lead: "Contract", text: "once all reads and writes use the new shape, drop the old column in a separate, later deploy — never in the same change that adds the new one." },
-        { lead: "Siloed tenants replay it N times", text: "the same DDL runs once per dedicated database for whale tenants; track per-tenant migration status in the directory so one stuck whale doesn't block the rollout for everyone else." },
+        { lead: "Rolled out shard by shard, not tenant by tenant", text: "each of the ~500 pooled shards gets the same DDL applied independently and staged, not all at once; each of the ~100 siloed databases replays it separately too. Track per-shard and per-tenant migration status in the directory so one stuck shard or whale doesn't block the rollout for everyone else." },
       ],
       pictureTitle: "Expand → migrate → contract",
       pictureRows: [
-        { label: "Big-bang ALTER TABLE on a live shared table", value: "locks/slows thousands of tenants at once", tone: "bad" },
+        { label: "Big-bang ALTER TABLE on a live shared table", value: "locks/slows every tenant on that shard at once", tone: "bad" },
         { label: "Expand: add nullable column", value: "zero-risk deploy, nothing reads it yet", tone: "good" },
         { label: "Backfill, rate-limited per shard", value: "doesn't become its own noisy neighbor", tone: "good" },
         { label: "Contract: drop old column later", value: "separate deploy, after full cutover", tone: "good" },
       ],
       remember: {
-        problem: "Ship a schema change to a table shared by tens of thousands of tenants with zero downtime.",
+        problem: "Ship a schema change across the pooled tier's shared tables, serving tens of thousands of tenants, with zero downtime.",
         solution: "Expand-migrate-contract: additive schema change, rate-limited backfill, then a separate later deploy to drop the old shape.",
         why: "Splitting the change into independently-safe steps means a bad step affects nothing until it's verified, instead of one risky change touching every tenant simultaneously.",
         tradeoff: "A migration now takes three deploys and a backfill window instead of one ALTER TABLE — slower, in exchange for never taking the whole shard down.",
@@ -302,7 +333,7 @@ export const multiTenantSaas: Problem = {
       "It's one platform serving tenants that range from 3 users to 20M, so the core bet is a hybrid tenancy model: pool the long tail behind shared, RLS-enforced Postgres shards, and give the handful of whale tenants their own dedicated database.",
       "Isolation is enforced by the database, not the app: Postgres Row-Level Security backstops every query, and SET LOCAL (not SET) keeps tenant context from leaking between requests that share a PgBouncer connection.",
       "Noisy neighbors are handled with per-tenant rate limits, bulkheaded connection pools, and a promotion path that moves a tenant from pooled to siloed once it outgrows its shard.",
-      "Schema changes on a table shared by thousands of tenants use expand-migrate-contract, never a big-bang ALTER TABLE, because a bad migration is felt by everyone at once.",
+      "Schema changes on the pooled tier's shared tables roll out shard by shard using expand-migrate-contract, never a big-bang ALTER TABLE, because a bad migration is felt by every tenant on that shard at once.",
       "Usage metering funds the bill, so unlike best-effort analytics it's at-least-once with idempotent aggregation, emitted off the request path so a billing hiccup never slows an API call.",
     ],
     flows: [
@@ -325,13 +356,13 @@ export const multiTenantSaas: Problem = {
         kind: "write",
         title: "WRITE · ONBOARDING · < 30S",
         summary:
-          "Signing up a tenant is a write to the directory plus provisioning storage for it — pooled tenants get rows in shared tables, whale tenants get a dedicated database.",
+          "Signing up a tenant is a write to the directory plus provisioning storage for it — pooled tenants get rows inserted into shared tables, and enterprise tenants claim a database from a pre-warmed standby pool instead of waiting on new cloud infrastructure to boot, which is what keeps both paths under 30 seconds.",
         steps: [
           { label: "Client", note: "signs up" },
           { label: "Onboarding Service", note: "creates the tenant record" },
           { label: "Tenant Directory", note: "registers tenant_id → shard/tier/region" },
           { label: "Pooled Postgres", note: "default tier: rows scoped behind RLS" },
-          { label: "Siloed Postgres", note: "enterprise tier: provisions a dedicated database" },
+          { label: "Siloed Postgres", note: "enterprise tier: claims a pre-provisioned dedicated DB from the standby pool" },
         ],
       },
       {
@@ -355,7 +386,7 @@ export const multiTenantSaas: Problem = {
           "50,000 tenants; largest whale tenant ~20M end users, smallest a 3-person startup",
           "200K API requests/sec platform-wide, p99 target independent of tenant size",
           "Top ~100 tenants (~0.2%) hold ~40% of total data — the power law that drives the pooled/siloed split",
-          "~500 pooled shards, thousands of tenants each; ~100 whale tenants each with a dedicated DB",
+          "~500 pooled shards, ~100 tenants each (49,900 pooled tenants ÷ 500); ~100 whale tenants, each with a dedicated DB",
           "Onboarding: new tenant provisioned and usable in < 30s",
           "Usage metering freshness: < 5 min from API call to billing dashboard",
           "~500GB/shard soft cap before a rebalance is triggered",
@@ -381,7 +412,7 @@ export const multiTenantSaas: Problem = {
           "Isolation must live in the database (RLS), because 'the app always remembers to filter' is not a guarantee",
           "PgBouncer transaction pooling plus session-level SET is a real cross-tenant leak vector — say SET LOCAL explicitly",
           "Tenant tiering is a continuous promotion path, not a one-time signup decision",
-          "A migration on a shared table is felt by thousands of tenants simultaneously — expand-migrate-contract, not big-bang",
+          "A migration on a shared table is felt by every tenant on that shard simultaneously and rolls out shard by shard — expand-migrate-contract, not big-bang",
           "Billing metering can't drop events like best-effort analytics can — money depends on it",
           "Data residency (EU tenants in an EU region) rides on the same tenant directory that does shard routing",
         ],
@@ -428,7 +459,7 @@ export const multiTenantSaas: Problem = {
       why: "Drawing the lanes separately proves you know they have different guarantees: the read path must never leak across tenants, onboarding must provision the right tier, and metering must never slow a request but also must never silently drop data.",
       steps: [
         { kind: "DRAW", text: 'Lay down the **read path**: Client → API Gateway (resolves tenant_id) → Rate Limiter (per-tenant bucket) → App Service (AsyncLocal tenant context) → Tenant Directory (cached shard lookup) → Pooled or Siloed Postgres. Label the last arrow **"SET LOCAL + RLS"**.' },
-        { kind: "DRAW", text: 'Add the **onboarding/write path** as a separate lane: Client → Onboarding Service → Tenant Directory (registers tenant) → Pooled Postgres or Siloed Postgres depending on plan tier, labeled **"< 30s provisioning"**.' },
+        { kind: "DRAW", text: 'Add the **onboarding/write path** as a separate lane: Client → Onboarding Service → Tenant Directory (registers tenant) → Pooled Postgres or Siloed Postgres depending on plan tier, labeled **"< 30s provisioning"**. Note that siloed tenants claim a database from a pre-warmed standby pool instead of waiting on new infrastructure to boot — that\'s what keeps the dedicated-tier path under 30s too.' },
         { kind: "DRAW", text: 'Add the **metering path** dropping off the App Service: → Kafka (acks=all) → Metering/Billing Service, dashed, labeled **"async, at-least-once, funds the bill"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they carry three different guarantees — the read path can never leak across tenants, onboarding decides pooled vs. siloed, and metering trades a little latency for correctness because it directly affects billing."' },
       ],
@@ -545,7 +576,7 @@ export const multiTenantSaas: Problem = {
       "Using session-level SET for tenant context with a transaction-pooled connection pooler like PgBouncer — a real, exploitable cross-tenant leak.",
       "Treating all 50,000 tenants as the same size and putting every tenant, including whales, in one shared database.",
       "No noisy-neighbor defense beyond 'add a rate limiter' — no connection pool bulkheads, no query timeouts, no promotion path.",
-      "Running a single big-bang ALTER TABLE against a table shared by thousands of tenants instead of an expand-migrate-contract rollout.",
+      "Running a single big-bang ALTER TABLE against a shared pooled-tier table instead of an expand-migrate-contract rollout.",
       "Treating usage metering like best-effort click analytics — dropping events on overflow when those events fund an invoice.",
       "No tenant directory or routing layer — assuming a single database can serve every tenant at any scale.",
     ],
@@ -564,7 +595,7 @@ export const multiTenantSaas: Problem = {
       },
       {
         q: "Why can't schema migrations be a single ALTER TABLE like in a normal app?",
-        a: "In a single-tenant app, a locked table during a migration affects one customer briefly. In the pooled tier here, one shared table serves thousands of tenants simultaneously, so a locking migration — or a NOT NULL column added without a default — breaks every in-flight write across every one of those tenants at once. The expand-migrate-contract pattern splits the change into independently safe deploys: add nullable, backfill in rate-limited batches, then drop the old shape only after everything has cut over, so no single step can take down the whole shard.",
+        a: "In a single-tenant app, a locked table during a migration affects one customer briefly. In the pooled tier here, one shared table on a shard serves roughly a hundred tenants simultaneously, and the same schema is replicated across every one of the ~500 pooled shards, so a locking migration — or a NOT NULL column added without a default — breaks every in-flight write for every tenant on whichever shard it hits. The expand-migrate-contract pattern splits the change into independently safe deploys — add nullable, backfill in rate-limited batches, then drop the old shape only after everything has cut over — and it has to be rolled out shard by shard so no single step can take down more than one shard at a time.",
       },
       {
         q: "Why does usage metering need stronger delivery guarantees than click analytics would?",

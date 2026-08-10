@@ -22,7 +22,7 @@ export const distributedTraining70b: Problem = {
     { label: "Ring All-Reduce", tone: "purple" },
     { label: "Sharding", tone: "green" },
     { label: "NVLink / NVSwitch", tone: "blue" },
-    { label: "Write-Ahead Logging", tone: "orange" },
+    { label: "etcd / ZooKeeper Leases", tone: "orange" },
     { label: "Leader Election", tone: "green" },
     { label: "Consensus (Raft/Paxos)", tone: "orange" },
   ],
@@ -32,7 +32,7 @@ export const distributedTraining70b: Problem = {
     caption: "THE WHOLE SYSTEM IN ONE PICTURE",
     nodes: [
       { id: "data-loader", label: "Sharded Data Loader", sub: "tokenized shards, per-DP-rank", col: 1, row: 1, tone: "slate" },
-      { id: "scheduler", label: "Job Scheduler", sub: "Slurm / Kubernetes", col: 1, row: 2, tone: "slate" },
+      { id: "scheduler", label: "Job Scheduler", sub: "Slurm / Kubernetes", col: 1, row: 3, tone: "slate" },
       {
         id: "node-a",
         label: "Node Group A",
@@ -60,10 +60,10 @@ export const distributedTraining70b: Problem = {
         row: 1,
         tone: "green",
       },
-      { id: "dp-allreduce", label: "DP Ring All-Reduce", sub: "InfiniBand NDR · 32-way", col: 3, row: 2, tone: "purple" },
-      { id: "zero1", label: "ZeRO-1 Optimizer Shards", sub: "1/32 optimizer state per rank", col: 4, row: 2, tone: "purple" },
-      { id: "ckpt-store", label: "Sharded Checkpoint Store", sub: "parallel FS / object store", col: 2, row: 3, tone: "orange" },
-      { id: "elastic", label: "Elastic Launcher", sub: "rendezvous + watchdog", col: 3, row: 3, tone: "orange" },
+      { id: "dp-allreduce", label: "DP Ring All-Reduce", sub: "InfiniBand NDR · 32-way", col: 2, row: 2, tone: "purple" },
+      { id: "zero1", label: "ZeRO-1 Optimizer Shards", sub: "1/32 optimizer state per rank", col: 3, row: 2, tone: "purple" },
+      { id: "elastic", label: "Elastic Launcher", sub: "rendezvous + watchdog", col: 2, row: 3, tone: "orange" },
+      { id: "ckpt-store", label: "Sharded Checkpoint Store", sub: "parallel FS / object store", col: 4, row: 3, tone: "orange" },
       { id: "metrics", label: "Loss & MFU Dashboard", sub: "W&B / Prometheus", col: 5, row: 3, tone: "orange" },
     ],
     edges: [
@@ -77,11 +77,14 @@ export const distributedTraining70b: Problem = {
       { from: "node-c", to: "dp-allreduce", label: "grads, ring all-reduce", kind: "write" },
       { from: "dp-allreduce", to: "zero1", label: "reduce-scatter", kind: "write" },
       { from: "zero1", to: "node-a", label: "all-gather updated shard", kind: "write" },
+      { from: "zero1", to: "node-c", label: "all-gather updated shard", kind: "write" },
       { from: "scheduler", to: "elastic", label: "spawn 2,048 ranks", kind: "analytics" },
       { from: "elastic", to: "node-a", label: "rank assignment / rendezvous", kind: "analytics" },
+      { from: "elastic", to: "node-c", label: "rank assignment / rendezvous", kind: "analytics" },
       { from: "node-a", to: "ckpt-store", label: "async sharded ckpt · 30min", kind: "analytics" },
       { from: "node-c", to: "ckpt-store", label: "async sharded ckpt · 30min", kind: "analytics" },
       { from: "elastic", to: "ckpt-store", label: "resume from latest on failure", kind: "analytics" },
+      { from: "ckpt-store", to: "node-a", label: "load sharded ckpt on resume", kind: "analytics" },
       { from: "node-b", to: "metrics", label: "loss, grad-norm, MFU", kind: "analytics" },
     ],
     legend: [
@@ -90,6 +93,25 @@ export const distributedTraining70b: Problem = {
       { kind: "analytics", text: "control plane · scheduling, checkpointing, monitoring — async, off the hot path" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["data-loader", "node-a", "node-b", "node-c"],
+      say: "Start with the compute skeleton: a sharded data loader feeds micro-batches into an 8-way tensor-parallel, 8-way pipeline-parallel model, drawn as three representative node groups out of eight pipeline stages. Activations flow forward left to right over InfiniBand between stages; the per-layer TP all-reduce stays inside each node on NVLink, so it's not a separate hop on this diagram.",
+    },
+    {
+      reveal: ["dp-allreduce", "zero1"],
+      say: "After backward, gradients from every stage ring-reduce-scatter across the 32 data-parallel replicas, so each rank ends up owning just its shard. ZeRO-1 runs the Adam step on that shard alone — about 0.4GB instead of 13GB per GPU — then all-gathers the updated weights back out to every stage before the next forward pass.",
+    },
+    {
+      reveal: ["scheduler", "elastic"],
+      say: "A job scheduler spawns all 2,048 ranks and hands them to an elastic launcher, which does rendezvous — assigning every node group its place in the TP/PP/DP grid over an etcd-backed, Raft-consistent view of who's alive. If a node dies mid-run, this is the piece that evicts it and re-elects a leader to sequence rendezvous with a replacement, instead of restarting the whole job.",
+    },
+    {
+      reveal: ["ckpt-store", "metrics"],
+      say: "Two things run off the hot path: every ~30 minutes each node group asynchronously flushes its own shard of model and optimizer state to a sharded checkpoint store, which the launcher reads from on resume, and loss, gradient-norm, and MFU stream continuously to a dashboard. Neither can ever block a training step.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -242,7 +264,7 @@ export const distributedTraining70b: Problem = {
         { lead: "MTBF math", text: "if a single GPU/NIC/node has a mean time between failures of, say, several years, 2,048 of them collectively fail far more often — the math that made a personal workstation reliable stops applying at fleet scale." },
         { lead: "Checkpoint interval sizes the blast radius", text: "checkpointing every ~30 minutes bounds the worst case to 30 minutes of recompute, negligible against a 3-4 week run, even if failures hit daily." },
         { lead: "Sharded, asynchronous writes", text: "each rank writes only its own shard, and offloads to host memory then flushes to the object store/parallel FS in the background — so the write doesn't block the next training step for the ~1.1TB aggregate checkpoint to land." },
-        { lead: "Elastic relaunch, not a cold restart", text: "the launcher detects the dead rank (NCCL timeout / heartbeat miss), evicts just that node, and re-does rendezvous with a replacement — the other 2,040 GPUs don't restart from zero." },
+        { lead: "Elastic relaunch, not a cold restart", text: "the launcher detects the dead rank (NCCL timeout / heartbeat miss), evicts just that node, and re-does rendezvous with a replacement — the other 2,040 GPUs don't restart from zero. Rendezvous itself runs on a small etcd cluster: Raft consensus gives every surviving rank the same view of who's alive, and the barrier elects one agent to sequence the new rank assignment, so there's no split-brain about the world size after a failure." },
       ],
       pictureTitle: "Failure is routine, not exceptional, at 2,048 GPUs",
       pictureRows: [

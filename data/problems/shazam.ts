@@ -7,7 +7,7 @@ export const shazam: Problem = {
   level: "Hard",
   deepDiveAvailable: true,
   intro: [
-    "Design Shazam: identify a song from a 5-10 second clip recorded on a phone microphone, matched against a catalog of 50 million songs, with server-side match compute under a few hundred milliseconds — while the audio has already been through a bar's PA system, a car engine, or a TV speaker before it ever reaches the mic. ~20 million identifications a day, spiking 10x+ during a live broadcast moment everyone is watching at once, all converging on one true match hiding inside a fingerprint index holding roughly half a trillion hash postings.",
+    "Design Shazam: identify a song from a 5-10 second clip recorded on a phone microphone, matched against a catalog of 50 million songs, with server-side match compute under a few hundred milliseconds — while the audio has already been through a bar's PA system, a car engine, or a TV speaker before it ever reaches the mic. ~20 million identifications a day (avg ~230/sec), spiking over 20x during a live broadcast moment everyone is watching at once, all converging on one true match hiding inside a fingerprint index holding roughly half a trillion hash postings.",
   ],
   hardParts:
     "The hard parts: building an audio fingerprint that survives noise and compression while staying cheap to hash; searching and voting across ~500 billion index postings fast enough to feel instant; and proving a match is real instead of a random hash collision — all while ingesting new songs into a live index without ever taking recognition down.",
@@ -58,9 +58,11 @@ export const shazam: Problem = {
         tone: "purple",
       },
       { id: "metadata", label: "Metadata Store", sub: "title/artist/art · RF=3", col: 5, row: 4, tone: "blue" },
+      { id: "datalake", label: "Data Lake", sub: "unmatched clips", col: 4, row: 4, tone: "orange" },
     ],
     edges: [
       { from: "client", to: "cdn", label: "cover art", kind: "read" },
+      { from: "cdn", to: "metadata", label: "miss", kind: "read" },
       { from: "client", to: "lb", kind: "read" },
       { from: "lb", to: "recognition", kind: "read" },
       { from: "recognition", to: "cache", label: "fingerprint-hash lookup", kind: "read" },
@@ -69,6 +71,8 @@ export const shazam: Problem = {
       { from: "recognition", to: "kafka", label: "async event", kind: "analytics" },
       { from: "kafka", to: "flink", kind: "analytics" },
       { from: "flink", to: "clickhouse", kind: "analytics" },
+      { from: "flink", to: "datalake", label: "unmatched clips", kind: "analytics" },
+      { from: "datalake", to: "ingestion", label: "gap signal", kind: "analytics" },
       { from: "lb", to: "ingestion", label: "new track, rare", kind: "write" },
       { from: "ingestion", to: "index", label: "bulk-write postings", kind: "write" },
       { from: "ingestion", to: "metadata", label: "song metadata", kind: "write" },
@@ -79,6 +83,29 @@ export const shazam: Problem = {
       { kind: "analytics", text: "trending + gap detection · never blocks a match" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "recognition", "index"],
+      say: "The client already did the expensive work on-device — spectrogram, peaks, hashes — so the API/LB just routes the compact fingerprint to a stateless Recognition Service, which fans hash lookups out across the Fingerprint Index in parallel and votes on the one song whose hashes line up in time.",
+    },
+    {
+      reveal: ["metadata", "cdn"],
+      say: "Once the vote picks a winner, Recognition resolves the song_id against the Metadata Store for title and artist, and the CDN serves cached cover art at the edge so image bytes never touch the identification path.",
+    },
+    {
+      reveal: ["cache"],
+      say: "During a viral broadcast moment, thousands of near-identical clips can hit the same shards in the same seconds — so a Valkey cache keyed on the fingerprint hash short-circuits repeats before they ever reach the full index fan-out.",
+    },
+    {
+      reveal: ["ingestion"],
+      say: "Growing the 50M-song catalog can't touch that hot path: an async Ingestion Pipeline runs the same spectrogram-to-hash steps as a query, then bulk-writes postings and metadata to replicas out of band, roughly 100K tracks a day.",
+    },
+    {
+      reveal: ["kafka", "flink", "clickhouse", "datalake"],
+      say: "Recognition drops a match or no-match event into Kafka and moves on. Flink aggregates it into ClickHouse for trending charts, and clips that never cleared the vote threshold land in a Data Lake that feeds the next ingestion batch — a gap-detection loop that never blocks a live identification.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -97,7 +124,7 @@ export const shazam: Problem = {
     ],
     nonFunctional: [
       { id: "NFR-01", text: "Server-side match latency once the fingerprint lands (excludes on-device recording time)", tag: "p99 < 300ms" },
-      { id: "NFR-02", text: "Identification throughput, sustained during a peak live-broadcast moment (avg ~250/sec)", tag: "5K/sec peak" },
+      { id: "NFR-02", text: "Identification throughput, sustained during a peak live-broadcast moment (avg ~230/sec)", tag: "5K/sec peak" },
       { id: "NFR-03", text: "Recognition service availability", tag: "99.95%" },
       { id: "NFR-04", text: "False-positive rate: probability of returning the wrong song as a confident match", tag: "< 0.1%" },
       { id: "NFR-05", text: "Catalog and fingerprint index size the system must serve reads against", tag: "50M songs / ~500B hashes" },
@@ -357,7 +384,7 @@ export const shazam: Problem = {
         icon: "🔢",
         items: [
           "50M songs in catalog, ~10K fingerprint hashes/song → ~500B total postings",
-          "~20M identifications/day, avg ~250/sec, peak ~5K/sec during big broadcasts",
+          "~20M identifications/day, avg ~230/sec, peak ~5K/sec (20x+) during big broadcasts",
           "Index storage: ~500B postings × ~10 bytes ≈ 5TB raw, ~15TB at RF=3",
           "30-bit hash (freqAnchor + freqTarget + Δtime) ≈ 1.07B buckets → ~467 avg collisions/bucket",
           "Fingerprint payload: tens of KB vs. ~1.7MB for 10s raw PCM",

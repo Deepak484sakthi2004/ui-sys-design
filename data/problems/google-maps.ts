@@ -68,7 +68,8 @@ export const googleMaps: Problem = {
       { from: "gateway", to: "routing", label: "route request", kind: "read" },
       { from: "routing", to: "chgraph", label: "bidirectional query over shortcuts", kind: "read" },
       { from: "chgraph", to: "roadstore", label: "cold shard load", kind: "read" },
-      { from: "client", to: "kafka", label: "GPS ping ~every 4s", kind: "write" },
+      { from: "client", to: "gateway", label: "GPS ping ~every 4s", kind: "write" },
+      { from: "gateway", to: "kafka", label: "fire-and-forget", kind: "write" },
       { from: "kafka", to: "mapmatch", kind: "analytics" },
       { from: "mapmatch", to: "speedstore", label: "snapped speed sample", kind: "analytics" },
       { from: "speedstore", to: "chgraph", label: "edge weight refresh, ~30-60s", kind: "analytics" },
@@ -79,6 +80,29 @@ export const googleMaps: Problem = {
       { kind: "analytics", text: "traffic pipeline · async, feeds back into route weights, never gates a route" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "search", "routing"],
+      say: "Two stateless services sit behind one API Gateway: Search handles geocoding and POI lookup, Routing computes turn-by-turn paths. Different problems, same entry point, and neither blocks the other.",
+    },
+    {
+      reveal: ["geoindex", "chgraph"],
+      say: "Neither service does real work alone. Search fans out to a Geo Index for spatial-plus-text ranking. Routing queries in-memory CH Graph Shards — a Contraction Hierarchy precomputed offline, so the online query only touches thousands of nodes, not the full 200M-edge graph.",
+    },
+    {
+      reveal: ["roadstore"],
+      say: "The CH shards are just a fast in-memory projection of the truth. Road Graph Store holds the versioned topology; a cold shard loads from here once, then serves entirely from RAM after that.",
+    },
+    {
+      reveal: ["cdn"],
+      say: "Tiles are a completely different volume problem from search or routing, so they get their own edge cache. A CDN absorbs ~90% of tile requests before a miss ever reaches the gateway.",
+    },
+    {
+      reveal: ["kafka", "mapmatch", "speedstore"],
+      say: "Every navigating phone streams a GPS ping every ~4s. A Flink job map-matches each noisy fix onto the right road with an HMM, writes a smoothed speed sample to the Speed Store, and that feeds back into the CH graph as a traffic overlay every 30-60s — async, and it never gates a route response.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

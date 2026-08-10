@@ -52,7 +52,6 @@ export const objectStorage: Problem = {
         row: 2,
         tone: "blue",
       },
-      { id: "events", label: "Event Bus (Kafka)", sub: "create / delete", col: 5, row: 2, tone: "orange" },
       {
         id: "placement",
         label: "Placement + EC Encoder",
@@ -62,6 +61,7 @@ export const objectStorage: Problem = {
         tone: "purple",
       },
       { id: "storage", label: "Storage Nodes", sub: "3 AZs · 9 shards/stripe", col: 4, row: 3, tone: "blue" },
+      { id: "events", label: "Event Bus (Kafka)", sub: "create / delete", col: 5, row: 3, tone: "orange" },
       { id: "repair", label: "Repair / Scrubber", sub: "Merkle-tree scan", col: 3, row: 4, tone: "orange" },
       { id: "lifecycle", label: "Lifecycle Manager", sub: "Standard → IA → Glacier", col: 4, row: 4, tone: "orange" },
     ],
@@ -81,6 +81,7 @@ export const objectStorage: Problem = {
       { from: "repair", to: "storage", label: "re-encode missing shard", kind: "analytics" },
       { from: "metadata", to: "lifecycle", label: "scan tier-eligible objects", kind: "analytics" },
       { from: "lifecycle", to: "storage", label: "rewrite to cold tier", kind: "analytics" },
+      { from: "lifecycle", to: "metadata", label: "commit new shard_map + tier", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "read path · 1M GET/sec" },
@@ -88,6 +89,29 @@ export const objectStorage: Problem = {
       { kind: "analytics", text: "background · repair, lifecycle, events — never blocks a GET or PUT" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "api", "metadata"],
+      say: "A stateless Object API Service sits behind a load balancer, and every GET or PUT resolves through one Metadata Store — the single source of truth for where an object's bytes actually live.",
+    },
+    {
+      reveal: ["placement", "storage"],
+      say: "A PUT doesn't write one copy: the API hands the object to a Placement plus EC Encoder, which splits it into Reed-Solomon 6+3 stripes and writes 9 shards across 3 AZs. Only after a quorum of those shards ack does the metadata pointer commit, which is what gives us read-after-write consistency without a lock.",
+    },
+    {
+      reveal: ["cdn"],
+      say: "At 1M GET/sec most of that traffic is public reads, so a CDN sits in front and absorbs roughly 30% before it ever reaches the API service.",
+    },
+    {
+      reveal: ["events"],
+      say: "Every create or delete drops an event on a Kafka bus for downstream consumers, fire-and-forget, so a slow subscriber never adds latency to the write that triggered it.",
+    },
+    {
+      reveal: ["repair", "lifecycle"],
+      say: "Two jobs run entirely off the hot path: a Scrubber walks every stripe with Merkle checksums and re-derives any shard that's gone bad, and a Lifecycle Manager scans metadata for objects past a policy threshold and re-encodes them into cheaper cold-tier storage, committing the updated pointer when it's done.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

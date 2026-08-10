@@ -13,7 +13,7 @@ export const aiAgentRestaurant: Problem = {
     "The hard parts: keeping the ASR→LLM→TTS turn under ~800ms so the conversation feels human, grounding every price and availability answer in live POS state so the agent never hallucinates an item that's 86'd, and gating every order mutation through a deterministic guardrail before it becomes an irreversible write to the kitchen.",
   keyTopics: [
     "Streaming ASR→LLM→TTS Pipeline",
-    "Per-Tenant RAG Menu Grounding",
+    "RAG + Live-Lookup Menu Grounding",
     "Deterministic Guardrail Gate",
     "Tool-Calling Order Builder",
     "Exactly-Once POS Writes",
@@ -35,6 +35,7 @@ export const aiAgentRestaurant: Problem = {
       { id: "gateway", label: "Voice/Chat Gateway", sub: "Twilio · WebSocket", col: 2, row: 1, tone: "slate" },
       { id: "asr", label: "Streaming ASR", sub: "partial transcripts <300ms", col: 3, row: 1, tone: "green" },
       { id: "tts", label: "Streaming TTS", sub: "sentence-chunked, barge-in aware", col: 4, row: 1, tone: "green" },
+      { id: "menurag", label: "Menu RAG", sub: "per-tenant vector index", col: 2, row: 2, tone: "purple" },
       {
         id: "orchestrator",
         label: "Agent Orchestrator",
@@ -44,7 +45,6 @@ export const aiAgentRestaurant: Problem = {
         row: 2,
         tone: "purple",
       },
-      { id: "menurag", label: "Menu RAG", sub: "per-tenant vector index", col: 2, row: 2, tone: "purple" },
       {
         id: "guardrail",
         label: "Guardrail Service",
@@ -56,6 +56,15 @@ export const aiAgentRestaurant: Problem = {
       },
       { id: "posadapter", label: "POS Adapter", sub: "Toast / Square / Clover", col: 5, row: 2, tone: "blue" },
       { id: "sessionstore", label: "Session Store", sub: "Redis · conversation + order state", col: 3, row: 3, tone: "blue" },
+      {
+        id: "menustore",
+        label: "Live Menu Store",
+        sub: "POS-mirrored price & stock",
+        mono: "authoritative · <60s freshness",
+        col: 5,
+        row: 3,
+        tone: "blue",
+      },
       { id: "eventbus", label: "Kafka", sub: "turn + tool-call events", col: 2, row: 4, tone: "orange" },
       { id: "evalpipeline", label: "Eval Pipeline", sub: "transcript replay & scoring", col: 4, row: 4, tone: "orange" },
     ],
@@ -63,22 +72,49 @@ export const aiAgentRestaurant: Problem = {
       { from: "customer", to: "gateway", label: "audio / text in", kind: "read" },
       { from: "gateway", to: "asr", label: "audio stream", kind: "read" },
       { from: "asr", to: "orchestrator", label: "partial + final transcript", kind: "read" },
-      { from: "orchestrator", to: "menurag", label: "grounding lookup", kind: "read" },
+      { from: "orchestrator", to: "menurag", label: "semantic grounding lookup", kind: "read" },
+      { from: "orchestrator", to: "menustore", label: "live price/stock lookup", kind: "read" },
       { from: "orchestrator", to: "sessionstore", label: "load/save turn state", kind: "read" },
       { from: "orchestrator", to: "tts", label: "response tokens, streamed", kind: "read" },
       { from: "tts", to: "gateway", label: "audio out", kind: "read" },
       { from: "gateway", to: "customer", label: "spoken response", kind: "read" },
       { from: "orchestrator", to: "guardrail", label: "propose order action", kind: "write" },
+      { from: "guardrail", to: "menustore", label: "re-verify price/stock/modifiers", kind: "write" },
       { from: "guardrail", to: "posadapter", label: "validated order · idempotency key", kind: "write" },
+      { from: "posadapter", to: "menustore", label: "POS webhook · menu sync, <60s", kind: "analytics" },
+      { from: "menustore", to: "menurag", label: "re-embed & index", kind: "analytics" },
       { from: "orchestrator", to: "eventbus", label: "turn + tool-call events, async", kind: "analytics" },
       { from: "eventbus", to: "evalpipeline", label: "replay & scoring", kind: "analytics" },
     ],
     legend: [
       { kind: "read", text: "conversation path · ASR→LLM→TTS, sub-800ms turn" },
       { kind: "write", text: "order path · guardrail-gated writes to the POS" },
-      { kind: "analytics", text: "async · transcripts, evals, cost tracking, never blocks a turn" },
+      { kind: "analytics", text: "async · menu sync, transcripts, evals, never blocks a turn" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["customer", "gateway", "orchestrator"],
+      say: "Start with the skeleton: a customer talks to a gateway, and one orchestrator holds the conversation. Everything else in this design exists to make that middle box fast, grounded, and safe.",
+    },
+    {
+      reveal: ["asr", "tts"],
+      say: "Speech has to stream in both directions — ASR emits partial transcripts under 300ms so the orchestrator can start reasoning before the caller finishes talking, and TTS starts speaking on the first generated sentence instead of waiting for the full reply. That's how we hit sub-800ms p95 turn latency.",
+    },
+    {
+      reveal: ["menurag", "menustore"],
+      say: "Menu truth is two lookups, not one: RAG resolves 'something spicy' to a real item by semantic search, but only the Live Menu Store — synced from the POS in under 60 seconds — has the authoritative price and stock at this exact second.",
+    },
+    {
+      reveal: ["guardrail", "posadapter"],
+      say: "The orchestrator never writes to the POS directly. It proposes an order action; the Guardrail Service re-checks price, stock, and totals against the Live Menu Store; only a validated action reaches the POS Adapter with an idempotency key, so a dropped call can't double-fire a ticket.",
+    },
+    {
+      reveal: ["sessionstore", "eventbus", "evalpipeline"],
+      say: "Round it out with state and observability: Redis holds per-session conversation and order state across turns, and every turn and tool call is dropped onto Kafka for an eval pipeline to replay and score — asynchronously, so it never adds a millisecond to a live call.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -322,7 +358,7 @@ export const aiAgentRestaurant: Problem = {
           { label: "Customer", note: "speaks or types" },
           { label: "Gateway", note: "streams audio/text in" },
           { label: "Streaming ASR", note: "partial transcripts, <300ms" },
-          { label: "Agent Orchestrator", note: "reasons, may call Menu RAG" },
+          { label: "Agent Orchestrator", note: "reasons, may call Menu RAG or the Live Menu Store" },
           { label: "Streaming TTS", note: "sentence-chunked, first byte ~150-200ms" },
           { label: "Gateway", note: "plays audio out" },
           { label: "Customer", note: "hears the reply, can barge in" },
@@ -335,7 +371,7 @@ export const aiAgentRestaurant: Problem = {
           "The LLM never writes to the POS. It proposes a tool call; a deterministic guardrail re-checks price, stock, and totals against live state before the POS adapter submits with an idempotency key.",
         steps: [
           { label: "Agent Orchestrator", note: "proposes submit_order" },
-          { label: "Guardrail Service", note: "validates price/stock/modifiers/totals" },
+          { label: "Guardrail Service", note: "re-checks price/stock/modifiers/totals against the Live Menu Store" },
           { label: "POS Adapter", note: "submits with idempotency key" },
           { label: "POS", note: "returns real success" },
           { label: "Agent Orchestrator", note: "confirms to the caller — only now" },
@@ -435,7 +471,7 @@ export const aiAgentRestaurant: Problem = {
       why: "Drawing conversation, order, and async as separate lanes proves you understand they have different latency and durability requirements. Candidates who draw one blob miss that a slow eval pipeline must never add latency to a live call, and that order writes need a safety gate the conversation path doesn't.",
       steps: [
         { kind: "DRAW", text: 'Lay down the **conversation lane**: Customer → Gateway → Streaming ASR → Orchestrator → Streaming TTS → Gateway → Customer. Label arrows **"<300ms partial transcript"**, **"streamed tokens"**, **"~150-200ms first audio byte"**.' },
-        { kind: "DRAW", text: 'Add the **order lane**: Orchestrator → Guardrail Service → POS Adapter, labeled **"guardrail-gated · idempotency key"**.' },
+        { kind: "DRAW", text: 'Add the **order lane**: Orchestrator → Guardrail Service (checks the Live Menu Store) → POS Adapter, labeled **"guardrail-gated · idempotency key"**.' },
         { kind: "DRAW", text: 'Add the **async lane**: Orchestrator → Kafka → Eval Pipeline, dashed, labeled **"never blocks a live turn"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they have three different SLAs — conversation is latency-critical tier-1, order writes are safety-critical tier-2, analytics and evals are best-effort tier-3."' },
       ],
@@ -464,7 +500,7 @@ export const aiAgentRestaurant: Problem = {
       steps: [
         { kind: "SAY", text: 'Explain the split: "RAG handles semantic discovery — \'something spicy\' — but it can return a stale price. Before confirming anything, I call a separate get_menu_item tool against the live, POS-mirrored table for the authoritative price and stock."' },
         { kind: "SAY", text: 'Introduce the guardrail unprompted: "Before any order-mutating tool call reaches the POS, a deterministic Guardrail Service re-checks stock, price, modifiers, and total bounds — outside the LLM\'s probabilistic loop."' },
-        { kind: "DRAW", text: 'Draw the chain: Orchestrator proposes → Guardrail validates → POS Adapter writes → confirmation only after real POS success.' },
+        { kind: "DRAW", text: 'Draw the chain: Orchestrator proposes → Guardrail validates against the Live Menu Store → POS Adapter writes → confirmation only after real POS success.' },
         { kind: "RULE OUT", text: '"Trust the LLM\'s own self-check" — a probabilistic model verifying itself isn\'t a safety boundary. Cross it off.' },
       ],
       grading: "Two-source grounding explained without prompting, the guardrail framed as the safety invariant of the whole system, and the self-verification alternative explicitly rejected.",
@@ -563,11 +599,11 @@ export const aiAgentRestaurant: Problem = {
       },
       {
         q: "What happens if the LLM hallucinates a menu item that doesn't exist?",
-        a: "The get_menu_item tool call resolves against the live POS-mirrored table, not RAG's fuzzy match; if the item genuinely doesn't exist, the tool returns a structured 'not found' and the orchestrator is prompted to clarify with the caller — it never reaches order submission. RAG is only used to help the LLM figure out which real item the caller might mean; the final identity is always resolved against ground truth.",
+        a: "The get_menu_item tool call resolves against the Live Menu Store, not RAG's fuzzy match; if the item genuinely doesn't exist, the tool returns a structured 'not found' and the orchestrator is prompted to clarify with the caller — it never reaches order submission. RAG is only used to help the LLM figure out which real item the caller might mean; the final identity is always resolved against ground truth.",
       },
       {
         q: "How do you keep menu changes (86'd items, price changes) from going stale?",
-        a: "POS webhooks (or short-polling where webhooks aren't available) push menu deltas into a menu-sync worker that updates both the live lookup table and the per-tenant vector index within under 60 seconds. The guardrail always re-checks against the live table at submit time regardless of when the RAG snapshot was taken, so even a stale vector index can't let a stale price through to the POS.",
+        a: "The POS Adapter receives webhooks (or short-polls where webhooks aren't available) and writes menu deltas into the Live Menu Store within under 60 seconds; a lightweight embedding job then re-indexes the per-tenant vector index off that same store. The guardrail always re-checks against the Live Menu Store at submit time regardless of when the RAG snapshot was taken, so even a stale vector index can't let a stale price through to the POS.",
       },
       {
         q: "What if the POS integration is down when the caller wants to place an order?",

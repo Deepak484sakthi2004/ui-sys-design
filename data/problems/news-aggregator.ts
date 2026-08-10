@@ -43,6 +43,7 @@ export const newsAggregator: Problem = {
         row: 1,
         tone: "blue",
       },
+      { id: "elasticsearch", label: "Elasticsearch", sub: "search · category/topic index", col: 5, row: 1, tone: "blue" },
       { id: "sources", label: "Content Sources", sub: "50K RSS / API / sitemaps", col: 1, row: 2, tone: "slate" },
       { id: "fetch", label: "Fetch Workers", sub: "adaptive polling + webhooks", col: 2, row: 2, tone: "green" },
       { id: "kafkaRaw", label: "Kafka", sub: "raw-articles topic", col: 3, row: 2, tone: "orange" },
@@ -64,12 +65,15 @@ export const newsAggregator: Problem = {
       { from: "feedsvc", to: "feedcache", label: "cache lookup", kind: "read" },
       { from: "feedcache", to: "ranker", label: "miss → generate", kind: "read" },
       { from: "ranker", to: "articleStore", label: "candidate fetch", kind: "read" },
+      { from: "ranker", to: "elasticsearch", label: "category/topic candidates", kind: "read" },
       { from: "sources", to: "fetch", label: "poll / webhook", kind: "write" },
       { from: "fetch", to: "kafkaRaw", label: "raw article event", kind: "write" },
       { from: "kafkaRaw", to: "dedupEnrich", label: "consume", kind: "write" },
       { from: "dedupEnrich", to: "articleStore", label: "story_id + metadata", kind: "write" },
+      { from: "dedupEnrich", to: "elasticsearch", label: "index story", kind: "write" },
       { from: "dedupEnrich", to: "trending", label: "story mention rate", kind: "analytics" },
       { from: "trending", to: "push", label: "spike detected", kind: "analytics" },
+      { from: "trending", to: "feedcache", label: "patch breaking story", kind: "analytics" },
       { from: "push", to: "client", label: "breaking-news alert", kind: "analytics" },
     ],
     legend: [
@@ -78,6 +82,29 @@ export const newsAggregator: Problem = {
       { kind: "analytics", text: "async · breaking-news detection & push, never blocks ingestion or feed reads" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "feedsvc", "ranker", "articleStore"],
+      say: "Start with the minimal request/response skeleton: a client asks Feed Service for a feed, Feed Service asks the Ranking Service, and Ranking pulls candidate stories straight from the Article Store. No cache yet — this is the correctness baseline before we make it fast.",
+    },
+    {
+      reveal: ["feedcache"],
+      say: "Reads beat writes 500 to 1, so put a cache in front of ranking. Feed Cache holds precomputed pages for actively engaged users; only a miss falls through to the Ranking Service. That's what keeps p99 under 200ms at 50K reads/sec.",
+    },
+    {
+      reveal: ["sources", "fetch", "kafkaRaw", "dedupEnrich"],
+      say: "Now the write side: 50K sources get polled adaptively or push via webhook, land raw in Kafka, and Dedup & Enrich clusters near-duplicate coverage of the same event — MinHash into LSH buckets, merged with union-find — before writing one story_id back to the Article Store.",
+    },
+    {
+      reveal: ["elasticsearch"],
+      say: "Dedup & Enrich also indexes every new story into Elasticsearch, which is what makes ingest-to-searchable under 60 seconds — and it's the same index Ranking Service queries for category and topic candidates.",
+    },
+    {
+      reveal: ["trending", "push"],
+      say: "Last, a side channel riding the same dedup stream: Flink tracks per-story velocity against an EWMA baseline, and a corroborated spike patches straight into Feed Cache and fires a push alert — async, so it never blocks ingestion or a feed read.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {

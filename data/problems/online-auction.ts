@@ -54,7 +54,7 @@ export const onlineAuction: Problem = {
         row: 2,
         tone: "blue",
       },
-      { id: "kafka", label: "Kafka", sub: "bid.placed / auction.closed", col: 3, row: 3, tone: "orange" },
+      { id: "kafka", label: "Kafka", sub: "bid.placed / settlement.completed", col: 3, row: 3, tone: "orange" },
       { id: "ws_gateway", label: "WebSocket Gateway", sub: "per-item pub/sub, throttled", col: 2, row: 3, tone: "orange" },
       {
         id: "closer",
@@ -86,7 +86,7 @@ export const onlineAuction: Problem = {
       { from: "bid_service", to: "kafka", label: "bid.placed, async", kind: "analytics" },
       { from: "kafka", to: "ws_gateway", label: "fan-out outbid alerts", kind: "analytics" },
       { from: "ws_gateway", to: "client", label: "real-time price push", kind: "analytics" },
-      { from: "kafka", to: "closer", label: "auction lifecycle timer", kind: "analytics" },
+      { from: "postgres", to: "closer", label: "poll due index · end_time<=now()", kind: "read" },
       { from: "closer", to: "postgres", label: "claim CLOSING · pick winner", kind: "write" },
       { from: "closer", to: "payment", label: "capture payment · saga", kind: "write" },
       { from: "payment", to: "kafka", label: "settlement.completed", kind: "analytics" },
@@ -97,6 +97,29 @@ export const onlineAuction: Problem = {
       { kind: "analytics", text: "async · events, fan-out, and background settlement" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "item_service", "bid_service"],
+      say: "Two stateless services behind an API gateway: Item Service for browsing, Bid Service for placing bids. Reads outnumber writes 200 to 1, but it's the bid path — many bidders racing to update one row — that has to be provably correct.",
+    },
+    {
+      reveal: ["cdn", "valkey"],
+      say: "Browsing is cache-served: a CDN for listing images, and a Valkey cache holding each item's current price at about 95% hit rate, so the database almost never sees a plain read.",
+    },
+    {
+      reveal: ["postgres"],
+      say: "CockroachDB, sharded by item_id, is the source of truth — an immutable bid ledger plus a mutable auction row. Every bid write is a CAS against a version column, so no lock ever sits on the hottest item.",
+    },
+    {
+      reveal: ["kafka", "ws_gateway"],
+      say: "Each accepted bid drops a bid.placed event into Kafka, keyed by item_id. A WebSocket Gateway fans it out to watchers, throttled to about one push per second per item so a sniping burst can't melt the connection layer.",
+    },
+    {
+      reveal: ["closer", "payment"],
+      say: "An Auction Closer polls CockroachDB's due index and CAS-claims the OPEN-to-CLOSING transition so only one worker ever wins, then hands off to Payment/Settlement as an idempotent saga — exactly-once close, exactly-once charge.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -431,7 +454,7 @@ export const onlineAuction: Problem = {
       steps: [
         { kind: "DRAW", text: 'Lay down the **read path**: Client → CDN → API Gateway → Item Service → Valkey → CockroachDB (miss only). Label **"~95% hit"** on the Valkey arrow.' },
         { kind: "DRAW", text: 'Add the **write path**: Client → API Gateway → Bid Service → CockroachDB, labeled **"CAS · version check, retry on conflict"**, then Bid Service → Valkey to update the cached price.' },
-        { kind: "DRAW", text: 'Add the **background/async lane**: Bid Service → Kafka → WebSocket Gateway → Client (throttled push), and separately Kafka → Auction Closer → CockroachDB (claim CLOSING) → Payment/Settlement.' },
+        { kind: "DRAW", text: 'Add the **background/async lane**: Bid Service → Kafka → WebSocket Gateway → Client (throttled push), and separately CockroachDB (poll due index) → Auction Closer → CockroachDB (claim CLOSING) → Payment/Settlement → Kafka (settlement.completed).' },
         { kind: "SAY", text: '"Three lanes, three correctness properties: reads are cache-served, writes need linearizable per-item CAS, and the close/settlement lane needs exactly-once — not just eventual consistency."' },
       ],
       grading: "Three clearly separated lanes, each arrow labeled with a share or a mechanism (not just a box name), and an explicit statement that the three lanes have different correctness requirements.",

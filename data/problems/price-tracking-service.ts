@@ -32,7 +32,7 @@ export const priceTrackingService: Problem = {
     caption: "THE WHOLE SYSTEM IN ONE PICTURE",
     nodes: [
       { id: "client", label: "Client", col: 1, row: 1, tone: "slate" },
-      { id: "productsvc", label: "Product Service", sub: "API gateway + reads", col: 2, row: 1, tone: "green" },
+      { id: "productsvc", label: "Product Service", sub: "API gateway · reads + watches", col: 2, row: 1, tone: "green" },
       { id: "rediscache", label: "Redis", sub: "hot price cache", col: 3, row: 1, tone: "green" },
       { id: "scylla", label: "ScyllaDB", sub: "price history, source of truth", col: 4, row: 1, tone: "blue" },
 
@@ -41,6 +41,7 @@ export const priceTrackingService: Problem = {
       { id: "rawkafka", label: "Kafka", sub: "raw-price-events", col: 3, row: 2, tone: "orange" },
       { id: "normalizer", label: "Normalizer", mono: "dedupe → canonical id → diff vs last", col: 4, row: 2, tone: "purple" },
 
+      { id: "changekafka", label: "Kafka", sub: "price-changed-events", col: 1, row: 3, tone: "orange" },
       { id: "flink", label: "Flink", sub: "alert matcher", col: 2, row: 3, tone: "orange" },
       { id: "watchidx", label: "Watch Index", sub: "product_id → watchers", col: 3, row: 3, tone: "blue" },
       { id: "notifsvc", label: "Notification Service", sub: "push · email · SMS · webhook", col: 4, row: 3, tone: "orange" },
@@ -49,7 +50,8 @@ export const priceTrackingService: Problem = {
       { from: "client", to: "productsvc", kind: "read" },
       { from: "productsvc", to: "rediscache", label: "~90% hit, sub-50ms", kind: "read" },
       { from: "rediscache", to: "scylla", label: "miss", kind: "read" },
-      { from: "scylla", to: "scheduler", label: "staleness + watch count", kind: "read" },
+      { from: "scheduler", to: "scylla", label: "staleness + watch count", kind: "read" },
+      { from: "productsvc", to: "watchidx", label: "create/delete watch", kind: "write" },
 
       { from: "scheduler", to: "crawlers", label: "next-crawl due", kind: "write" },
       { from: "crawlers", to: "rawkafka", label: "scraped/API price", kind: "write" },
@@ -57,9 +59,10 @@ export const priceTrackingService: Problem = {
       { from: "normalizer", to: "scylla", label: "upsert current + append history", kind: "write" },
       { from: "normalizer", to: "rediscache", label: "invalidate/update", kind: "write" },
 
-      { from: "normalizer", to: "flink", label: "price-changed event", kind: "analytics" },
+      { from: "normalizer", to: "changekafka", label: "price-changed event", kind: "analytics" },
+      { from: "changekafka", to: "flink", kind: "analytics" },
       { from: "flink", to: "watchidx", label: "match watchers", kind: "analytics" },
-      { from: "watchidx", to: "notifsvc", label: "candidate alerts", kind: "analytics" },
+      { from: "flink", to: "notifsvc", label: "candidate alerts", kind: "analytics" },
       { from: "notifsvc", to: "client", label: "push/email/SMS · <5min", kind: "analytics" },
     ],
     legend: [
@@ -68,6 +71,25 @@ export const priceTrackingService: Problem = {
       { kind: "analytics", text: "alert path · async, never blocks ingestion or reads" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "productsvc", "scylla"],
+      say: "Start with the shape of a read: the Client asks Product Service for a product page, and Product Service reads straight from ScyllaDB. Correct, but every single page view pays a database hit.",
+    },
+    {
+      reveal: ["rediscache"],
+      say: "Reads outnumber ingestion writes roughly 3 to 1, so Redis sits in front of Scylla: about 90% of product-page reads are served from cache in well under 50ms, and the database is only touched on a miss.",
+    },
+    {
+      reveal: ["scheduler", "crawlers", "rawkafka", "normalizer"],
+      say: "None of that price data appears by itself. A Crawl Scheduler decides what's due next from staleness and watch count, Crawl Workers fetch it — merchant API first, polite scraping fallback — and everything lands in Kafka before the Normalizer dedupes it, resolves the canonical product id, and writes the new price into Scylla, invalidating the cache.",
+    },
+    {
+      reveal: ["changekafka", "flink", "watchidx", "notifsvc"],
+      say: "Every price-changed event the Normalizer emits goes onto its own Kafka topic — the buffer that survives a Black Friday spike — then Flink matches it against the reverse Watch Index and hands candidate alerts to the Notification Service, which rate-limits per channel and gets a push out inside 5 minutes.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -93,7 +115,7 @@ export const priceTrackingService: Problem = {
       { id: "NFR-06", text: "Price-history durability: no lost samples once ingested", tag: "zero loss" },
       { id: "NFR-07", text: "Read-path availability (about 4.4h downtime/year)", tag: "99.95%" },
       { id: "NFR-08", text: "Scrape success rate per merchant domain (avoid bot-blocking)", tag: "> 95%" },
-      { id: "NFR-09", text: "Read (page views) to crawl-ingestion-write ratio that anchors the design", tag: "20:1" },
+      { id: "NFR-09", text: "Read (page views) to crawl-ingestion-write ratio that anchors the design", tag: "~3:1" },
     ],
   },
 
@@ -314,7 +336,7 @@ export const priceTrackingService: Problem = {
           "A user opens a product page. The request checks Redis first for the current price, and only falls through to ScyllaDB on a cache miss.",
         steps: [
           { label: "Client", note: "opens a tracked product's page" },
-          { label: "Product Service", note: "API gateway + read path" },
+          { label: "Product Service", note: "API gateway, ~48K/sec reads at peak" },
           { label: "Redis", note: "~90% hit, sub-50ms" },
           { label: "ScyllaDB", note: "miss → current price + history range scan" },
         ],
@@ -328,7 +350,7 @@ export const priceTrackingService: Problem = {
           { label: "Crawl Scheduler", note: "priority = watch count + volatility + staleness" },
           { label: "Crawl Workers", note: "merchant API preferred, headless/proxy fallback" },
           { label: "Kafka", note: "raw-price-events" },
-          { label: "Normalizer", note: "canonical product_id, diff vs last price" },
+          { label: "Normalizer", note: "canonical product_id, diff vs last price; Bloom filter rejects already-seen raw duplicates before the Scylla check" },
           { label: "ScyllaDB + Redis", note: "append history, upsert current, invalidate cache" },
         ],
       },
@@ -339,6 +361,7 @@ export const priceTrackingService: Problem = {
           "A real price change emits an event; the alert path fans out to only the watchers of that product, then rate-limits delivery per channel.",
         steps: [
           { label: "Normalizer", note: "emits price-changed only on a real delta" },
+          { label: "Kafka", note: "price-changed-events, buffers the sale-day burst" },
           { label: "Flink", note: "alert matcher, threshold comparison" },
           { label: "Watch Index", note: "product_id → watchers, O(watchers of this product)" },
           { label: "Notification Service", note: "dedup, per-channel rate limit, <5min p99" },
@@ -352,6 +375,7 @@ export const priceTrackingService: Problem = {
         items: [
           "200M products, 50K merchants, 50M watched, 80M active watches",
           "Crawl throughput: ~13.9K/sec watched (60min) + ~1.7K/sec long-tail (24h) ≈ 16K/sec",
+          "Product-page reads ≈ 48K/sec at peak (~3:1 vs. ~16K/sec ingestion writes)",
           "Normal-day change events: ~800/sec (≈5% of checks); Black Friday burst: up to 50K/sec",
           "Price history: 30-day raw ≈6TB (18TB at RF=3) + 2yr daily rollups ≈6TB (18TB at RF=3)",
           "Notification latency p99 < 5 min; product-page read p99 < 150ms",
@@ -394,7 +418,7 @@ export const priceTrackingService: Problem = {
         { kind: "ASK", text: '**How many products, and how many are actually watched?** Land on "200M products, 50M watched, 80M active watches" and write **"200M / 50M watched / 80M watches"** on the board.' },
         { kind: "ASK", text: 'Next: **"What\'s the freshness SLA?"** Land on "watched tier <= 60 min stale, long-tail <= 24h", and **"notification p99 < 5 min from detection"**.' },
         { kind: "SAY", text: 'State scope. In: "ingestion, product identity, adaptive crawl, alert fan-out, price history, notifications". Out: "payments, checkout, browser extension client". "Let me know if you\'d like me to come back to any of those."' },
-        { kind: "WRITE", text: 'Do the crawl-throughput math out loud: **"50M watched / 3600s ≈ 13.9K/sec"**, **"150M long-tail / 86400s ≈ 1.7K/sec"**, **"≈16K checks/sec steady state"**. Write the totals down.' },
+        { kind: "WRITE", text: 'Do the crawl-throughput math out loud: **"50M watched / 3600s ≈ 13.9K/sec"**, **"150M long-tail / 86400s ≈ 1.7K/sec"**, **"≈16K checks/sec steady state"**. Reads run roughly 3× that, **"≈48K/sec"**, off the read-to-ingestion-write ratio. Write the totals down.' },
       ],
       grading: "Are the freshness and notification SLAs pinned in numbers, and is crawl throughput derived from the catalog split rather than guessed?",
     },
@@ -420,7 +444,7 @@ export const priceTrackingService: Problem = {
       steps: [
         { kind: "DRAW", text: 'Lay down the **read lane**: Client → Product Service → Redis → ScyllaDB. Label **"~90% Redis hit, sub-50ms"**, **"miss → Scylla range scan"**.' },
         { kind: "DRAW", text: 'Add the **ingestion lane**: Crawl Scheduler → Crawl Workers → Kafka → Normalizer → ScyllaDB + Redis invalidation. Label **"~16K checks/sec"**, **"merchant API first, scrape fallback"**.' },
-        { kind: "DRAW", text: 'Add the **alert lane** dropping off the Normalizer: → Flink → Watch Index → Notification Service → channels. Label **"price-changed only"**, **"async, <5min p99"**.' },
+        { kind: "DRAW", text: 'Add the **alert lane** dropping off the Normalizer: → Kafka (price-changed-events) → Flink → Watch Index → Notification Service → channels. Label **"price-changed only"**, **"async, <5min p99"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes, three SLAs — reads are latency-critical for users, ingestion is throughput-critical for freshness, and alerting is correctness-critical: it must find the right subset of watchers, fast, without ever blocking ingestion."' },
       ],
       grading: "Three clearly separated lanes, arrows carrying real numbers, and an explicit statement that alerting never blocks ingestion.",

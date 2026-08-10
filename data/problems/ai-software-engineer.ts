@@ -45,12 +45,13 @@ export const aiSoftwareEngineer: Problem = {
         row: 2,
         tone: "green",
       },
-      { id: "sandbox", label: "Sandbox VM", sub: "Firecracker microVM · repo checkout", col: 2, row: 2, tone: "orange" },
-      { id: "llm", label: "LLM Inference", sub: "tool use · KV-cache reuse", col: 3, row: 2, tone: "purple" },
+      { id: "llm", label: "LLM Inference", sub: "tool use · KV-cache reuse", col: 2, row: 2, tone: "purple" },
+      { id: "sandbox", label: "Sandbox VM", sub: "Firecracker microVM · repo checkout", col: 3, row: 2, tone: "orange" },
       { id: "verify", label: "Verification Gate", sub: "tests · lint · build · exit code", col: 4, row: 2, tone: "green" },
       { id: "git", label: "Git / PR Service", sub: "commit · push · open PR", col: 5, row: 2, tone: "blue" },
 
-      { id: "eventbus", label: "Event Bus", sub: "Kafka: session + tool events", col: 2, row: 3, tone: "orange" },
+      { id: "sessionlog", label: "Session Log", sub: "event-sourced · durable per-step checkpoint", col: 1, row: 3, tone: "blue" },
+      { id: "eventbus", label: "Event Bus", sub: "Kafka: live progress + cost, best-effort", col: 2, row: 3, tone: "orange" },
       { id: "tracestore", label: "Trace + Cost Store", sub: "transcripts · replay · billing", col: 4, row: 3, tone: "orange" },
     ],
     edges: [
@@ -59,22 +60,48 @@ export const aiSoftwareEngineer: Problem = {
       { from: "retrieval", to: "repoindex", label: "hybrid search", kind: "read" },
       { from: "retrieval", to: "agentloop", label: "context bundle", kind: "read" },
       { from: "orchestrator", to: "agentloop", label: "spawn session", kind: "write" },
-      { from: "agentloop", to: "llm", label: "propose next action", kind: "read" },
-      { from: "llm", to: "agentloop", label: "tool call", kind: "read" },
+      { from: "agentloop", to: "llm", label: "propose next action", kind: "write" },
+      { from: "llm", to: "agentloop", label: "tool call", kind: "write" },
       { from: "agentloop", to: "sandbox", label: "exec: edit / run / test", kind: "write" },
       { from: "sandbox", to: "verify", label: "run tests · lint · build", kind: "write" },
       { from: "verify", to: "agentloop", label: "fail → retry, bounded", kind: "write" },
       { from: "verify", to: "git", label: "pass → commit + PR", kind: "write" },
       { from: "git", to: "repoindex", label: "delta re-embed on push", kind: "analytics" },
-      { from: "agentloop", to: "eventbus", label: "emit step events, async", kind: "analytics" },
-      { from: "eventbus", to: "tracestore", label: "aggregate transcripts + cost", kind: "analytics" },
+      { from: "agentloop", to: "sessionlog", label: "checkpoint step, durable", kind: "write" },
+      { from: "sessionlog", to: "orchestrator", label: "replay on restart", kind: "read" },
+      { from: "agentloop", to: "eventbus", label: "progress + cost, best-effort", kind: "analytics" },
+      { from: "eventbus", to: "tracestore", label: "aggregate cost + billing", kind: "analytics" },
+      { from: "sessionlog", to: "tracestore", label: "archive for replay + audit", kind: "analytics" },
     ],
     legend: [
-      { kind: "read", text: "context path · retrieval + planning" },
-      { kind: "write", text: "execution path · agent loop, sandbox, verification, commit" },
-      { kind: "analytics", text: "async background · indexing, events, cost — never blocks a tool call" },
+      { kind: "read", text: "context path · retrieval + planning + session replay" },
+      { kind: "write", text: "execution path · agent loop, sandbox, verification, commit, checkpoint" },
+      { kind: "analytics", text: "async background · telemetry, indexing, audit archive — never blocks a tool call" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["source", "orchestrator", "agentloop", "llm"],
+      say: "Start with the shape of the loop: a task lands, the orchestrator spawns a bounded session, and the agent loop asks an LLM for the next action. Nothing executes yet — this is just the control loop.",
+    },
+    {
+      reveal: ["sandbox", "verify", "git"],
+      say: "Give the loop hands: it executes each proposed action inside an isolated sandbox, gates on a real test/build/lint run rather than the model's own opinion, and only after that gate passes does it commit and open a PR.",
+    },
+    {
+      reveal: ["retrieval", "repoindex"],
+      say: "None of that works on a real codebase without context first. Hybrid retrieval — embeddings plus AST/grep — pulls the right slice out of a repo index, because the repo itself is roughly 20x too big to just paste into the model's context window.",
+    },
+    {
+      reveal: ["sessionlog"],
+      say: "Sessions run for hours, so treat every step as durable: the agent loop appends each plan/act/observe step to a session log, and a restarted orchestrator replays it to resume from the exact last step instead of losing the work.",
+    },
+    {
+      reveal: ["eventbus", "tracestore"],
+      say: "Everything else is async and never blocks a tool call: live progress and cost events stream to an event bus best-effort, the durable session log is separately archived for audit, and both land in a trace store for billing and replay.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -258,11 +285,13 @@ export const aiSoftwareEngineer: Problem = {
         { lead: "Idempotent tool calls", text: "each tool call carries an idempotency key, so a retried step after a crash doesn't re-run a destructive command twice." },
         { lead: "Checkpoint after every step", text: "the orchestrator can be killed and restarted at any point and rehydrate the full conversation and plan state from the log, not from a periodic snapshot that might be stale." },
         { lead: "Sandbox state is separate", text: "the microVM can be paused/resumed or recreated from the last known-good commit, so orchestrator and sandbox failures are recovered independently." },
+        { lead: "Not the same pipeline as telemetry", text: "the session log is a distinct, durably-acked write path from the best-effort event stream used for live progress and cost dashboards — losing a telemetry event is fine, losing a checkpoint is not." },
       ],
       pictureTitle: "What survives a mid-task crash?",
       pictureRows: [
         { label: "In-memory only", value: "pod dies, hours of progress lost", tone: "bad" },
         { label: "Periodic snapshot", value: "loses work since the last snapshot", tone: "neutral" },
+        { label: "Best-effort telemetry stream", value: "fine for cost dashboards, not a durability guarantee", tone: "neutral" },
         { label: "Event-sourced log, checkpoint per step", value: "resumes from the exact last step, zero lost progress", tone: "good" },
       ],
       remember: {
@@ -331,9 +360,9 @@ export const aiSoftwareEngineer: Problem = {
         kind: "write",
         title: "WRITE · AGENT EXECUTION LOOP",
         summary:
-          "The agent proposes one action at a time, executes it in an isolated sandbox, and checks the result before deciding the next step. This loop repeats — bounded by an iteration and cost budget — until an objective gate says done.",
+          "The agent proposes one action at a time, executes it in an isolated sandbox, and checks the result before deciding the next step. Every step is durably checkpointed as it happens. This loop repeats — bounded by an iteration and cost budget — until an objective gate says done.",
         steps: [
-          { label: "Agent Loop", note: "plan → act → observe controller" },
+          { label: "Agent Loop", note: "plan → act → observe; checkpoints each step to the session log" },
           { label: "LLM Inference", note: "proposes the next tool call" },
           { label: "Sandbox VM", note: "executes: edit file, run command, run test" },
           { label: "Verification Gate", note: "real test/build/lint, gates on exit code" },
@@ -342,13 +371,14 @@ export const aiSoftwareEngineer: Problem = {
       },
       {
         kind: "analytics",
-        title: "ASYNC · EVENTS, INDEXING, COST — NEVER BLOCKS THE LOOP",
+        title: "ASYNC · TELEMETRY, INDEXING, AUDIT — NEVER BLOCKS THE LOOP",
         summary:
-          "Nothing in the background pipeline sits on the critical path of a tool call. Step events stream out for observability and billing, and a push re-embeds only the files that changed.",
+          "Nothing in the background pipeline sits on the critical path of a tool call. Live progress and cost events stream out best-effort, the durable session log is separately archived for audit and replay, and a push re-embeds only the files that changed.",
         steps: [
-          { label: "Agent Loop", note: "emits step/tool-call events, fire-and-forget" },
+          { label: "Agent Loop", note: "emits live progress + cost events, best-effort" },
           { label: "Event Bus (Kafka)", note: "partitioned by session id" },
-          { label: "Trace + Cost Store", note: "transcripts, replay, per-session billing" },
+          { label: "Session Log", note: "durable checkpoints archived for replay + audit" },
+          { label: "Trace + Cost Store", note: "billing, transcripts — fed by both feeds" },
           { label: "Repo Index", note: "delta re-embed triggered by git push" },
         ],
       },
@@ -374,7 +404,7 @@ export const aiSoftwareEngineer: Problem = {
           "Hybrid retrieval (embeddings + AST/grep + re-rank), not whole-repo-in-context or per-repo fine-tuning",
           "One Firecracker microVM per session, warm-pooled, not shared containers or full VMs",
           "Independent verification gate on real exit codes, not the model self-reporting success",
-          "Event-sourced session log checkpointed per step, so crashes resume instead of restart",
+          "Event-sourced session log checkpointed per step — separate from the best-effort telemetry stream — so crashes resume instead of restart",
           "Rolling summarization + sub-agents to keep multi-hour sessions inside the context budget",
           "Least-privilege short-TTL credentials, egress allow-listing, human approval on risky actions",
         ],
@@ -386,6 +416,7 @@ export const aiSoftwareEngineer: Problem = {
           "The context-window-vs-repo-size math is the load-bearing proof that retrieval is mandatory, not optional",
           "Reward hacking is a named risk: an ungated agent can 'fix' a red test by deleting it",
           "Analytics/indexing/events are async and never block a tool call, same tier discipline as any read-heavy system",
+          "The durable checkpoint (session log) is a different pipeline than best-effort telemetry — losing a checkpoint breaks crash recovery, losing a progress event does not",
         ],
       },
     ],
@@ -430,8 +461,8 @@ export const aiSoftwareEngineer: Problem = {
       why: "Drawing context, execution, and async as separate lanes proves you understand they have different requirements (latency, durability, blast radius) and so need different infra. Candidates who draw one blob miss that indexing and event logging must never sit on the tool-call path.",
       steps: [
         { kind: "DRAW", text: 'Lay down the **context lane**: Task Source → Orchestrator → Context Retrieval → Repo Index. Label the arrow **"hybrid: embeddings + grep/AST"**, **"p99 < 300ms"**.' },
-        { kind: "DRAW", text: 'Add the **execution lane**: Agent Loop → LLM Inference → Sandbox VM → Verification Gate → Git/PR Service. Label **"plan → act → observe"**, **"bounded iterations"**, **"gate on real exit code"**.' },
-        { kind: "DRAW", text: 'Add the **async lane** dropping off the Agent Loop and Git: → Event Bus (Kafka) → Trace + Cost Store, and Git → Repo Index labeled **"delta re-embed on push"**, dashed, **"never blocks a tool call"**.' },
+        { kind: "DRAW", text: 'Add the **execution lane**: Agent Loop → LLM Inference → Sandbox VM → Verification Gate → Git/PR Service. Label **"plan → act → observe"**, **"bounded iterations"**, **"gate on real exit code"**. Agent Loop also writes a **Session Log** on every step — that write is durable, so it stays in this lane, not the async one.' },
+        { kind: "DRAW", text: 'Add the **async lane** dropping off the Agent Loop, the Session Log, and Git: → Event Bus (Kafka) → Trace + Cost Store for live progress and cost, Session Log → Trace + Cost Store for durable audit/replay, and Git → Repo Index labeled **"delta re-embed on push"**, dashed, **"never blocks a tool call"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they have three jobs — read decides what the agent sees, write is the actual loop with a hard verification gate, async is observability and indexing that must never add latency to a tool call."' },
       ],
       grading: "Three clearly separated lanes, arrows labeled with latency budgets and gating behavior, and an explicit statement that async never sits on the tool-call path.",

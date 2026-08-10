@@ -56,8 +56,8 @@ export const rateLimiter: Problem = {
       { id: "kafka", label: "Kafka", sub: "decision log", col: 3, row: 3, tone: "orange" },
       { id: "analytics", label: "Flink + Abuse Detection", col: 4, row: 3, tone: "orange" },
       { id: "sync", label: "Cross-Region Sync", sub: "gossip / cluster bus", col: 5, row: 3, tone: "orange" },
-      { id: "configsvc", label: "Config Service", sub: "rule CRUD", col: 2, row: 4, tone: "blue" },
-      { id: "postgres", label: "Postgres", sub: "rule store", col: 1, row: 4, tone: "blue" },
+      { id: "configsvc", label: "Config Service", sub: "rule CRUD", col: 1, row: 4, tone: "blue" },
+      { id: "postgres", label: "Postgres", sub: "rule store", col: 2, row: 4, tone: "blue" },
     ],
     edges: [
       { from: "client", to: "gateway", kind: "read" },
@@ -70,7 +70,7 @@ export const rateLimiter: Problem = {
       { from: "limiter", to: "kafka", label: "async decision event", kind: "analytics" },
       { from: "kafka", to: "analytics", kind: "analytics" },
       { from: "redis", to: "sync", label: "cluster bus", kind: "analytics" },
-      { from: "postgres", to: "configsvc", label: "rule defs", kind: "write" },
+      { from: "configsvc", to: "postgres", label: "persist rule", kind: "write" },
       { from: "configsvc", to: "limiter", label: "push limits · pub/sub", kind: "write" },
     ],
     legend: [
@@ -79,6 +79,29 @@ export const rateLimiter: Problem = {
       { kind: "analytics", text: "async · decision logging & cross-region sync, never blocks a decision" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "limiter", "api"],
+      say: "Start with the skeleton: the API Gateway asks an embedded Rate Limiter Lib for a verdict before forwarding to the Downstream API. That decision has to add well under a millisecond, so it lives in the request path as a library, not behind a network hop.",
+    },
+    {
+      reveal: ["localcache", "redis"],
+      say: "At 1M decisions/sec, a synchronous check on every request is a non-starter. A Local Token Cache answers most checks from memory in microseconds; only on a miss or the periodic sync does it touch the shared Redis Cluster, which holds ~50M active keys as the source of truth.",
+    },
+    {
+      reveal: ["kafka", "analytics"],
+      say: "Every allow/deny decision also drops onto Kafka and moves on — Flink aggregates those events for abuse detection, fully async, so a logging outage can never slow a live decision.",
+    },
+    {
+      reveal: ["sync"],
+      say: "Regions are active-active too. Redis clusters gossip across regions over a cluster bus, so a limit that's meant to be global stays close to accurate without a synchronous WAN round trip on every request.",
+    },
+    {
+      reveal: ["configsvc", "postgres"],
+      say: "Limits are data, not code: an operator edits a rule through the Config Service, it's persisted in Postgres, and pushed to every gateway node over pub/sub in under 5 seconds — no redeploy.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -199,6 +222,7 @@ export const rateLimiter: Problem = {
       title: "Local cache + async sync: the signature hard part",
       body: [
         "The naive design has every request make a synchronous Redis round trip. At 1M decisions/sec that's both a 1-2ms latency tax on every request and a single Redis cluster absorbing the full fleet's write load. The fix trades a small, bounded amount of accuracy for near-zero added latency in the common case — and it's the tradeoff an interviewer is specifically listening for.",
+        "This is CAP theorem in miniature, applied on purpose: during a network partition between a node's local count and the shared Redis state, pick availability (answer from the local cache, stay up) over strict consistency (block on Redis to get the exact global count). Name that tradeoff explicitly rather than treating it as an implementation detail.",
       ],
       bullets: [
         { lead: "Naive: synchronous check every time", text: "every request pays a network round trip to Redis (~1-2ms) before the gateway can respond, and Redis becomes the throughput ceiling for the entire fleet." },

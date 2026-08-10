@@ -60,7 +60,10 @@ export const localDelivery: Problem = {
       { from: "dispatch", to: "eta", label: "score candidates by ETA", kind: "read" },
       { from: "dispatch", to: "ordersDb", label: "assign · CAS update", kind: "write" },
       { from: "dispatch", to: "courierApp", label: "push offer · 20-30s to accept", kind: "write" },
-      { from: "dispatch", to: "wsGateway", label: "assignment + location updates", kind: "read" },
+      { from: "courierApp", to: "dispatch", label: "accept/decline", kind: "write" },
+      { from: "customerApp", to: "wsGateway", label: "subscribe · order channel", kind: "read" },
+      { from: "dispatch", to: "wsGateway", label: "assignment created", kind: "write" },
+      { from: "geoUpdater", to: "wsGateway", label: "threshold-filtered location", kind: "read" },
       { from: "wsGateway", to: "customerApp", label: "live tracking push", kind: "read" },
       { from: "courierApp", to: "pingIngest", label: "location ping · ~4s", kind: "analytics" },
       { from: "pingIngest", to: "geoUpdater", kind: "analytics" },
@@ -72,6 +75,29 @@ export const localDelivery: Problem = {
       { kind: "analytics", text: "background · location ping ingestion, decoupled from dispatch latency" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["customerApp", "apiGateway", "orderSvc", "ordersDb"],
+      say: "Start with the order write path: a customer submits an order through the gateway to a stateless Order Service, which writes a durable row to Postgres, geo-sharded by city. Two problems are still unsolved: matching that order to a courier, and showing the customer where the courier is.",
+    },
+    {
+      reveal: ["dispatch", "geoIndex", "eta"],
+      say: "Once an order is ready, Dispatch Service takes over: it k-ring queries the Redis/H3 geo index for nearby couriers, scores each candidate by routed ETA instead of straight-line distance, then writes the winning assignment back to Postgres with a conditional update so two racing workers can never double-book the same courier.",
+    },
+    {
+      reveal: ["courierApp"],
+      say: "Dispatch pushes the assignment to the Courier App as an offer with a 20-to-30-second accept window. A decline or timeout comes right back to Dispatch, which requeues the order with a priority boost and tries the next candidate.",
+    },
+    {
+      reveal: ["pingIngest", "geoUpdater"],
+      say: "Every courier also pings its position roughly every 4 seconds — about 125,000 pings a second system-wide. That firehose never touches the order tables: it flows through Kafka to a Geo-Index Updater that keeps the H3 cells in Redis fresh, fully decoupled from dispatch latency.",
+    },
+    {
+      reveal: ["wsGateway"],
+      say: "For live tracking, the customer subscribes to a per-order WebSocket channel on the Tracking Gateway. Dispatch publishes the assignment there, and the Geo-Index Updater publishes only threshold-filtered location changes off that same ping pipeline, so the map moves smoothly without re-broadcasting every raw ping.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -276,7 +302,7 @@ export const localDelivery: Problem = {
       title: "Tracking fan-out and regional isolation, without a meltdown",
       body: [
         "Two separate scaling problems hide behind 'show the customer where their courier is': how do you push updates to a customer's map without re-broadcasting all 125,000 pings a second, and how do you keep one city's infrastructure trouble from taking down every other city at once?",
-        "For fan-out, never push a raw ping. Each order gets its own pub/sub channel; only the courier assigned to that order publishes to it, and only when they've moved more than a threshold distance or a state changes — most 4-second pings that show someone sitting still or moving predictably never generate a customer-visible update at all. The client also smooths the dot's motion between updates (interpolation) rather than snapping it, since a raw GPS ping is noisy and a jump every 4 seconds looks broken even when it's technically correct. For isolation, shard everything — dispatch workers, the geo index, the pub/sub channels — by metro region, so a city is the unit of failure: if that region's Redis cluster falls over, dispatch degrades or pauses in that city alone, while every other city continues untouched.",
+        "For fan-out, never push a raw ping. Each order gets its own pub/sub channel; the same Geo-Index Updater that consumes the ping stream also checks whether the courier who just moved is the one assigned to an open order, and only publishes to that order's channel when they've moved more than a threshold distance or a state changes — most 4-second pings that show someone sitting still or moving predictably never generate a customer-visible update at all. The client also smooths the dot's motion between updates (interpolation) rather than snapping it, since a raw GPS ping is noisy and a jump every 4 seconds looks broken even when it's technically correct. For isolation, shard everything — dispatch workers, the geo index, the pub/sub channels — by metro region, so a city is the unit of failure: if that region's Redis cluster falls over, dispatch degrades or pauses in that city alone, while every other city continues untouched.",
       ],
       bullets: [
         { lead: "Per-order channel, not broadcast", text: "a customer subscribes only to their own order's channel; nobody's client receives another customer's courier updates." },
@@ -332,11 +358,12 @@ export const localDelivery: Problem = {
         kind: "read",
         title: "READ · LIVE TRACKING · < 5S FRESHNESS",
         summary:
-          "The customer subscribes to a channel scoped to their one order. Only meaningful courier movement or a state change gets published, so the map updates smoothly without re-broadcasting every raw ping.",
+          "The customer subscribes to a channel scoped to their one order. Dispatch publishes the initial assignment; after that, the same background pipeline consuming location pings publishes only meaningful courier movement, so the map updates smoothly without re-broadcasting every raw ping.",
         steps: [
           { label: "Customer App", note: "subscribes on order creation" },
           { label: "Tracking Gateway", note: "WebSocket · per-order Redis pub/sub channel" },
-          { label: "Dispatch Service", note: "publishes assignment + threshold-filtered location" },
+          { label: "Dispatch Service", note: "publishes the assignment when a courier accepts" },
+          { label: "Geo-Index Updater", note: "publishes threshold-filtered location off the ping stream" },
           { label: "Customer App", note: "map dot interpolated between updates" },
         ],
       },
@@ -434,7 +461,7 @@ export const localDelivery: Problem = {
       steps: [
         { kind: "DRAW", text: 'Lay down the **write path**: Customer App → API Gateway → Order Service → Postgres (insert) → Dispatch Service → Geo Index (k-ring query) → Routing/ETA Engine (score) → Postgres (CAS assign) → Courier App (push offer). Label arrows **"WHERE status=available"** and **"p95 < 8s"**, not the boxes.' },
         { kind: "DRAW", text: 'Add the **background lane**, fully separate: Courier App → Kafka (~125K/s) → Geo-Index Updater → Geo Index. Label it **"decoupled from dispatch latency"**.' },
-        { kind: "DRAW", text: 'Add the **read/tracking lane**: Dispatch Service → Tracking Gateway (per-order pub/sub) → Customer App. Label it **"threshold-published, < 5s freshness"**.' },
+        { kind: "DRAW", text: 'Add the **read/tracking lane**: Customer App subscribes to the Tracking Gateway; Dispatch Service publishes the assignment onto that channel, and the Geo-Index Updater publishes threshold-filtered location off the same ping stream. Label it **"threshold-published, < 5s freshness"**.' },
         { kind: "SAY", text: 'Narrate the split: "Three lanes because they have three different failure and latency profiles — dispatch is latency-critical, location ingestion is a firehose that must never block dispatch, and tracking is best-effort push."' },
       ],
       grading: "Three visually separated lanes, arrows carrying numbers, and an explicit statement that the ping firehose never touches the dispatch decision synchronously.",

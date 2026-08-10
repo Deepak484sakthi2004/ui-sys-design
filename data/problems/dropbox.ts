@@ -87,7 +87,7 @@ export const dropbox: Problem = {
       },
     ],
     edges: [
-      { from: "client", to: "gateway", label: "long-poll: anything changed?", kind: "read" },
+      { from: "client", to: "gateway", label: "pull: journal since cursor", kind: "read" },
       { from: "gateway", to: "metadata", label: "journal cursor", kind: "read" },
       { from: "metadata", to: "client", label: "delta: changed block list", kind: "read" },
       { from: "client", to: "blockcache", label: "fetch missing blocks", kind: "read" },
@@ -96,6 +96,8 @@ export const dropbox: Problem = {
       { from: "gateway", to: "blockserver", label: "new blocks only", kind: "write" },
       { from: "blockserver", to: "blockstore", label: "dedup'd write", kind: "write" },
       { from: "blockserver", to: "metadata", label: "commit version · append journal", kind: "write" },
+      { from: "client", to: "gateway", label: "open long-poll", kind: "analytics" },
+      { from: "gateway", to: "notify", label: "route + hold, namespace-sharded", kind: "analytics" },
       { from: "metadata", to: "queue", label: "publish change event", kind: "analytics" },
       { from: "queue", to: "notify", label: "fanout", kind: "analytics" },
       { from: "notify", to: "client", label: "wake: pull now", kind: "analytics" },
@@ -107,6 +109,25 @@ export const dropbox: Problem = {
       { kind: "analytics", text: "async background · notify + indexing, never blocks sync" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["client", "gateway", "metadata", "blockserver"],
+      say: "Two services behind the gateway: Metadata Service owns the journal for the sync side, Block Server owns dedup and commit for the write side. A client asks for journal entries since its last cursor; a write goes to the Block Server first so nothing touches storage before it's checked against what already exists.",
+    },
+    {
+      reveal: ["blockcache"],
+      say: "Block reads don't hit storage directly — an edge cache sits in front, since most fetches are for recently-synced content. Only a cache miss goes further back.",
+    },
+    {
+      reveal: ["blockstore"],
+      say: "Blocks land in a content-addressed object store at exabyte scale, keyed by SHA-256. The Block Server only writes here after confirming the hash is actually new, so the same bytes from any user physically land once.",
+    },
+    {
+      reveal: ["queue", "notify", "workers"],
+      say: "Everything past the commit is async. Metadata publishes to Kafka; the Notification Service holds a long-poll per active user and wakes the right one with a thin 'go pull' signal; background workers pick up thumbnailing, virus scan, and search indexing off the same event stream. None of it sits on the sync or upload path.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -126,7 +147,7 @@ export const dropbox: Problem = {
     nonFunctional: [
       { id: "NFR-01", text: "Change-to-other-device notification latency, online devices", tag: "p99 < 2s" },
       { id: "NFR-02", text: "Metadata operation latency (list, rename, move)", tag: "p99 < 100ms" },
-      { id: "NFR-03", text: "Sustained block-write throughput, platform-wide", tag: "500K/sec" },
+      { id: "NFR-03", text: "Sustained block-write throughput, platform-wide", tag: "50K/sec" },
       { id: "NFR-04", text: "Total files tracked in metadata", tag: "100B files" },
       { id: "NFR-05", text: "Durability of a committed block", tag: "11 nines" },
       { id: "NFR-06", text: "Service availability", tag: "99.9%" },
@@ -168,7 +189,7 @@ export const dropbox: Problem = {
       title: "Global dedup: content-addressable storage without a hot index",
       body: [
         "Two users uploading the same PDF, or one user copying a folder, should not double the bytes on disk. Address every block by its content hash (SHA-256) instead of an assigned ID: two identical byte sequences always produce the same key, so 'does this block already exist' is a single lookup, and storing it twice is structurally impossible — the second write just increments a reference count.",
-        "The danger is that this hash lookup sits on every single upload, so at 500K blocks/sec it has to be sharded like everything else. Shard the block-existence index by hash prefix (the hash is already uniformly distributed, so this needs no separate hashing scheme, unlike sharding by user), which spreads the lookup load evenly and keeps any one shard from becoming a hot spot for a viral file.",
+        "The danger is that this hash lookup sits on every single upload, so at 50K blocks/sec sustained it has to be sharded like everything else. Shard the block-existence index by hash prefix (the hash is already uniformly distributed, so this needs no separate hashing scheme, unlike sharding by user), which spreads the lookup load evenly and keeps any one shard from becoming a hot spot for a viral file.",
       ],
       bullets: [
         { lead: "Content hash as the key", text: "SHA-256 over the chunk bytes. Same bytes, same key, so identical content across any two users collapses to one stored copy automatically." },
@@ -257,6 +278,7 @@ export const dropbox: Problem = {
         { lead: "Thin wake signal only", text: "the notification carries a namespace ID, nothing else. The client still does a real pull against Metadata Service to get the actual delta — this keeps the Notification Service stateless about file content." },
         { lead: "WebSockets (considered)", text: "lower latency, fully bidirectional, but holding millions of persistent duplex connections is operationally heavier than a request that naturally re-issues every ~60s. Reasonable choice; long-poll is simpler to scale horizontally and degrade gracefully." },
         { lead: "Sharded by user/namespace", text: "notification servers are assigned namespace ranges (consistent hashing) so a fanout from Kafka only has to reach the handful of servers currently holding that user's connections." },
+        { lead: "Why 100M, not 300M", text: "100M DAU average ~3 devices each, but mobile OSes kill background sockets and rely on native push (APNs/FCM) instead — only the desktop/laptop client keeps a persistent background daemon. So the long-poll count tracks DAU (~1 held connection per active user), not devices; mobile wake-ups are a separate, OS-level push integration outside this service." },
       ],
       pictureTitle: "Poll vs. long-poll at 100M idle devices",
       pictureRows: [
@@ -391,7 +413,7 @@ export const dropbox: Problem = {
           "500M users, 100M DAU, ~3 devices/user, ~100B files tracked",
           "~exabyte-scale logical data; dedup + compression cut physical storage ~2-3x",
           "Chunk size: content-defined, ~4MB average, clamped ~2-8MB band",
-          "Sustained block writes: ~500K/sec platform-wide",
+          "Sustained block writes: ~50K/sec platform-wide (post-dedup; matches ~1EB corpus at a realistic annual growth rate)",
           "Notification Service: ~100M concurrent idle long-poll connections",
           "Durability target: 11 nines per block (erasure-coded cold tier)",
           "Notification latency p99 < 2s; metadata op p99 < 100ms",
@@ -417,6 +439,7 @@ export const dropbox: Problem = {
           "Dedup is global (cross-user), which is why it's keyed by content hash, not by owner",
           "A device with no local manifest must fall back to a full sync — name this explicitly",
           "Durability (erasure coding) and availability (caching) are solved by different mechanisms",
+          "~100M long-poll connections tracks DAU, not devices — mobile wakes via OS push (APNs/FCM), not a held socket",
         ],
       },
     ],

@@ -41,7 +41,7 @@ export const notificationSystem: Problem = {
         row: 1,
         tone: "purple",
       },
-      { id: "prefs", label: "Preference Service", sub: "opt-in · quiet hours", col: 2, row: 2, tone: "blue" },
+      { id: "prefs", label: "Preference Service", sub: "opt-in · quiet hours", col: 2, row: 2, tone: "purple" },
       { id: "kafka", label: "Kafka", sub: "priority-partitioned topics", col: 3, row: 1, tone: "orange" },
       { id: "fanout", label: "Fan-out Worker", sub: "Flink · topic → user list", col: 3, row: 2, tone: "orange" },
       {
@@ -56,16 +56,17 @@ export const notificationSystem: Problem = {
       { id: "push", label: "APNs / FCM", col: 5, row: 1, tone: "green" },
       { id: "emailgw", label: "SES / SendGrid", col: 5, row: 2, tone: "green" },
       { id: "smsgw", label: "Twilio", col: 5, row: 3, tone: "green" },
-      { id: "status", label: "Delivery Status Store", sub: "Cassandra · receipts", col: 3, row: 3, tone: "purple" },
-      { id: "client", label: "Client App", sub: "device + inbox", col: 1, row: 3, tone: "green" },
+      { id: "status", label: "Delivery Status Store", sub: "Cassandra · receipts", col: 5, row: 4, tone: "blue" },
+      { id: "client", label: "Client App", sub: "device + inbox", col: 1, row: 3, tone: "slate" },
     ],
     edges: [
       { from: "trigger", to: "api", label: "POST /notify", kind: "write" },
-      { from: "api", to: "prefs", label: "check opt-in / quiet hours", kind: "write" },
+      { from: "api", to: "prefs", label: "basic eligibility check", kind: "write" },
       { from: "api", to: "kafka", label: "publish, partitioned by priority", kind: "write" },
       { from: "kafka", to: "fanout", label: "consume", kind: "analytics" },
-      { from: "fanout", to: "prefs", label: "resolve topic → user list", kind: "analytics" },
+      { from: "fanout", to: "prefs", label: "resolve topic → opted-in user list", kind: "analytics" },
       { from: "fanout", to: "router", label: "per-user send job", kind: "analytics" },
+      { from: "router", to: "prefs", label: "live opt-out / quiet-hours / rate-limit check", kind: "analytics" },
       { from: "router", to: "push", label: "push channel", kind: "analytics" },
       { from: "router", to: "emailgw", label: "email channel", kind: "analytics" },
       { from: "router", to: "smsgw", label: "sms channel", kind: "analytics" },
@@ -81,6 +82,29 @@ export const notificationSystem: Problem = {
       { kind: "analytics", text: "async fan-out & dispatch pipeline · never blocks the ingest call" },
     ],
   },
+
+  diagramSteps: [
+    {
+      reveal: ["trigger", "api", "kafka", "client"],
+      say: "A backend service publishes through one API, which appends to a priority-partitioned Kafka topic and acks immediately — the caller never waits for delivery. The client is who eventually receives it, across whichever channel it lands on.",
+    },
+    {
+      reveal: ["fanout", "router"],
+      say: "Kafka decouples ingest from delivery. A Fan-out Worker turns one event into up to millions of per-user send jobs, paged rather than materialized all at once, and hands each job to a Channel Router that picks the channel and applies per-provider rate limits.",
+    },
+    {
+      reveal: ["push", "emailgw", "smsgw"],
+      say: "Three independent third-party gateways — APNs/FCM, SES/SendGrid, Twilio — each sit behind their own circuit breaker and backoff, so one provider's bad day never cascades into the other two channels.",
+    },
+    {
+      reveal: ["prefs"],
+      say: "Preferences gate the pipeline twice: a cheap eligibility check at ingestion, then a live opt-out, quiet-hours, and rate-limit check right at the Channel Router — because an unsubscribe has to block the very next send, not just future campaigns.",
+    },
+    {
+      reveal: ["status"],
+      say: "Every gateway feeds delivery receipts back into a Cassandra-backed status store, partitioned by user and TTL'd, and that's what the client's notification history reads from — fully decoupled from the send path.",
+    },
+  ],
 
   // -------------------------------------------------------------------------
   requirements: {
@@ -129,7 +153,7 @@ export const notificationSystem: Problem = {
       pictureRows: [
         { label: "Ingestion (API calls)", value: "low — tens/sec even at peak", tone: "good" },
         { label: "Send rate (avg)", value: "~12K/sec (1B/day)", tone: "neutral" },
-        { label: "Send rate (broadcast peak)", value: "~50K/sec, 10M-user segment in <10min", tone: "bad" },
+        { label: "Send rate (broadcast peak)", value: "~50K/sec provisioned — a 10M-segment/<10min SLA alone needs only ~17K/sec", tone: "bad" },
       ],
       remember: {
         problem: "1B/day understates the real load because one API call can fan out to millions of sends.",
@@ -361,7 +385,7 @@ export const notificationSystem: Problem = {
         icon: "🔢",
         items: [
           "500M users, 1B sends/day ≈ 12K/sec average",
-          "Broadcast peak: 10M-user segment fanned out in < 10 min ⇒ ~50K/sec",
+          "10M-user segment fan-out completes in < 10 min (~17K/sec sustained); fan-out workers and gateways provisioned to ~50K/sec peak for larger bursts",
           "Ingestion API latency p99 < 200ms; transactional delivery p95 < 5s",
           "Duplicate-delivery rate on retried sends < 0.01%",
           "Delivery-status freshness < 5s; provider failover < 30s",
@@ -405,7 +429,7 @@ export const notificationSystem: Problem = {
         { kind: "ASK", text: 'Push on the number: **"Is that 1B API calls, or 1B individual deliveries?"** Get them to confirm it\'s deliveries — one publish can fan out to millions. Write **"fan-out multiplier"** next to the throughput line.' },
         { kind: "SAY", text: 'Propose the priority split yourself: **"transactional (OTP, security) vs. bulk/marketing"**, and state the requirement: **"transactional must never queue behind bulk."** Wait for a nod.' },
         { kind: "SAY", text: 'State scope. In: "ingestion, preferences, fan-out, multi-channel dispatch, delivery status." Out: "template design/authoring UI, push-token registration flow, billing." "Let me know if you want me to expand any of those."' },
-        { kind: "WRITE", text: 'Write the peak case: **"10M-user segment broadcast, < 10 min completion ⇒ ~50K/s peak"**. This is the number that sizes the fan-out worker pool, not the daily average.' },
+        { kind: "WRITE", text: 'Write the peak case: **"10M-user segment, < 10 min completion ⇒ ~17K/s sustained; provision to ~50K/s peak"**. This is the number that sizes the fan-out worker pool, not the daily average.' },
       ],
       grading: "Did you separate ingestion rate from send rate unprompted, and lock the transactional-vs-bulk priority split before moving to the API?",
     },
@@ -523,7 +547,7 @@ export const notificationSystem: Problem = {
         gaps: [
           "Volunteers delivery-level (not just ingestion-level) dedup only after being pushed on retries.",
           "Doesn't proactively frame preference enforcement as a compliance requirement until asked 'why does this matter legally'.",
-          "Quantifies the fan-out burst in words ('it gets big') rather than numbers ('10M users in <10 min ⇒ ~50K/s').",
+          "Quantifies the fan-out burst in words ('it gets big') rather than numbers ('10M users in <10 min needs ~17K/s sustained').",
         ],
       },
       {

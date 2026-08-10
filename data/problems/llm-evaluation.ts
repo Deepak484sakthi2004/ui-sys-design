@@ -7,7 +7,7 @@ export const llmEvaluation: Problem = {
   level: "Hard",
   deepDiveAvailable: true,
   intro: [
-    "Design a platform that evaluates LLM-powered features before and after they ship: run 50K test-case executions per day across golden datasets, model versions, and prompt versions, grade outputs with rule-based, embedding, and LLM-as-judge scorers, detect statistically significant regressions inside a 30-minute nightly window, and gate pull-request merges on a 5-minute smoke suite — all while controlling cost against rate-limited third-party model APIs.",
+    "Design a platform that evaluates LLM-powered features before and after they ship: run 60K test-case executions per day across golden datasets, model versions, and prompt versions, grade outputs with rule-based, embedding, and LLM-as-judge scorers, detect statistically significant regressions inside a 30-minute nightly window, and gate pull-request merges on a 5-minute smoke suite — all while controlling cost against rate-limited third-party model APIs.",
   ],
   hardParts:
     "The hard parts: LLM outputs are non-deterministic, so a single failing test case is not proof of a regression; using an LLM to grade LLM output (LLM-as-judge) introduces its own bias that has to be calibrated against humans on an ongoing basis; and running thousands of rate-limited, expensive model calls without blowing either the CI latency budget or the API bill.",
@@ -73,6 +73,25 @@ export const llmEvaluation: Problem = {
     ],
   },
 
+  diagramSteps: [
+    {
+      reveal: ["client", "api", "orchestrator"],
+      say: "Start with the control plane: a client — a CI job, the SDK, or a dashboard user — submits a run to the Eval API, which hands it to a durable orchestrator. Nothing executes yet; this is just deciding what needs to happen and how to survive a crash midway through it.",
+    },
+    {
+      reveal: ["queue", "workers", "gateway", "providers"],
+      say: "The orchestrator fans a run out into one task per test case on a Kafka queue. A stateless, autoscaled worker pool pulls batches and calls a model through a rate-limited Model Gateway to the actual providers — OpenAI, Anthropic, Bedrock — so no single provider's throttling stalls the others.",
+    },
+    {
+      reveal: ["scorers", "results"],
+      say: "Every raw output goes to the Scorer Service — rule-based, embedding, or LLM-as-judge, whichever fits the criteria — and the resulting score, with full lineage back to the exact dataset/prompt/model version, lands immutably in the Results Store.",
+    },
+    {
+      reveal: ["regression", "dashboard"],
+      say: "A Regression Detector compares this run's score distribution against the baseline with a bootstrap confidence interval and reports pass/fail back to the orchestrator to gate CI, while a Dashboard queries the same results store for score trends — neither one ever sits on the run-execution path.",
+    },
+  ],
+
   // -------------------------------------------------------------------------
   requirements: {
     functional: [
@@ -92,7 +111,7 @@ export const llmEvaluation: Problem = {
       { id: "NFR-01", text: "PR smoke-suite gate latency, end to end", tag: "p99 < 5 min" },
       { id: "NFR-02", text: "Full nightly regression suite (10K cases) completion time", tag: "< 30 min" },
       { id: "NFR-03", text: "Per test-case latency, generation + judge round trip", tag: "p99 < 30s" },
-      { id: "NFR-04", text: "Sustained eval throughput (smoke + nightly + shadow)", tag: "50K/day" },
+      { id: "NFR-04", text: "Sustained eval throughput (smoke + nightly + shadow)", tag: "60K/day" },
       { id: "NFR-05", text: "Judge-vs-human agreement rate on the calibration gold set", tag: "> 85%" },
       { id: "NFR-06", text: "Durability of stored scores and traces (audit/compliance)", tag: "zero loss" },
       { id: "NFR-07", text: "Cache hit rate on repeated prompt+params+model tuples", tag: "> 30%" },
@@ -108,12 +127,12 @@ export const llmEvaluation: Problem = {
       title: "Sizing: what does a nightly run actually cost?",
       body: [
         "Before picking any infrastructure, size the workload in model calls, because that number drives everything downstream: worker pool size, rate-limit budgeting, and the API bill. The nightly full regression suite covers 10,000 test cases across 20 product-area suites. To handle non-determinism (more on that next), each case is sampled 3 times, and every sample gets graded once.",
-        "That is 10,000 × 3 = 30,000 generation calls, plus 30,000 judge calls, for 60,000 model calls per nightly run. The PR smoke suite is smaller and single-sampled: 500 cases × 1 sample × 2 calls (generate + judge) = 1,000 calls, run on roughly 50 PRs a day, so 50,000 calls a day just from smoke gating. Total: on the order of 110,000 raw model calls a day, at a blended cost around $0.015/call, that's roughly $1,500-2,000/day in third-party API spend for evaluation alone — before the product's own inference bill.",
+        "That is 10,000 × 3 = 30,000 generation calls, plus 30,000 judge calls, for 60,000 model calls per nightly run. The PR smoke suite is smaller and single-sampled: 500 cases × 1 sample × 2 calls (generate + judge) = 1,000 calls, run on roughly 50 PRs a day, so 50,000 calls a day just from smoke gating. That alone is 110,000 raw model calls a day from CI gating; shadow evaluation adds roughly 5,000 more judge-only calls (production already generated the output, so shadow only pays for scoring, not generation) for ~115,000 calls a day total, at a blended cost around $0.015/call, roughly $1,500-2,000/day in third-party API spend for evaluation alone — before the product's own inference bill.",
       ],
       bullets: [
         { lead: "Nightly full suite", text: "10,000 cases × 3 samples = 30,000 generations + 30,000 judge calls = 60,000 calls, budgeted to finish inside 30 minutes." },
         { lead: "PR smoke suite", text: "500 cases × 1 sample × 2 calls ≈ 1,000 calls per PR, budgeted to finish inside 5 minutes so it doesn't stall merges." },
-        { lead: "Aggregate", text: "~110K calls/day across smoke + nightly + shadow sampling, which is the number that sizes the worker pool and the rate-limit budget, not 'a lot of API calls'." },
+        { lead: "Aggregate", text: "~115K calls/day across smoke + nightly + shadow sampling — the number that sizes the worker pool and the rate-limit budget, not 'a lot of API calls'." },
       ],
       pictureTitle: "Where do 60,000 nightly calls come from?",
       pictureCaption: "10,000 cases × 3 samples = 30K generations, each graded once = 30K judge calls, total 60K",
@@ -251,7 +270,7 @@ export const llmEvaluation: Problem = {
       n: 6,
       title: "Production shadow evaluation: closing the feedback loop",
       body: [
-        "A golden dataset only tests what someone already imagined could go wrong. Production traffic finds the failures nobody thought to write a test case for. Sample about 1% of live production requests (with PII redacted), and run them through the same scorer pipeline asynchronously — never on the user-facing request path, the same way click analytics never sits on a redirect.",
+        "A golden dataset only tests what someone already imagined could go wrong. Production traffic finds the failures nobody thought to write a test case for. Sample about 1% of live production requests (with PII redacted) — on the order of 5,000 sampled cases a day off a ~500K/day production request volume — and run them through the same scorer pipeline asynchronously — never on the user-facing request path, the same way click analytics never sits on a redirect.",
         "Shadow evaluation does two jobs: it catches regressions and silent model drift the offline suite missed — including a provider quietly swapping the model behind a version string — and it mines new golden test cases from real failures, feeding them back into the offline dataset so the smoke and nightly suites get sharper over time instead of going stale.",
       ],
       bullets: [
@@ -332,7 +351,7 @@ export const llmEvaluation: Problem = {
           "10,000-case nightly full regression suite; 500-case PR smoke suite",
           "3 samples/case on nightly → 30K generations + 30K judge calls = 60K model calls, < 30 min",
           "Smoke suite: 500 cases × 1 sample × 2 calls ≈ 1K calls per PR, < 5 min gate",
-          "~50K test-case executions/day sustained (smoke + nightly + 1% prod shadow sample)",
+          "~60K test-case executions/day: 30K nightly + 25K smoke (500 × 50 PRs) + ~5K shadow (1% of ~500K/day prod traffic) — ~115K raw model calls/day once judge calls are counted",
           "Per-test-case p99 (generation + judge round trip): < 30s",
           "Judge-vs-human agreement target: > 85%",
           "Cache hit rate target on repeated prompt/param/model tuples: > 30%",
@@ -562,15 +581,15 @@ export const llmEvaluation: Problem = {
       {
         heading: "The one-line mental model",
         body: [
-          "This is a durable batch-execution pipeline that turns (prompt version, model version, dataset version) into a statistically defensible score. The core operation — run a test case, grade the output, compare to a baseline — is simple; everything expensive (sampling, judge calibration, durable orchestration, tiered gating) exists to make that comparison trustworthy at 50K executions a day against non-deterministic, rate-limited, third-party model APIs.",
+          "This is a durable batch-execution pipeline that turns (prompt version, model version, dataset version) into a statistically defensible score. The core operation — run a test case, grade the output, compare to a baseline — is simple; everything expensive (sampling, judge calibration, durable orchestration, tiered gating) exists to make that comparison trustworthy at 60K executions a day against non-deterministic, rate-limited, third-party model APIs.",
           "Anchor everything on the call-volume math: 10,000 nightly cases × 3 samples = 60,000 model calls in a 30-minute window, plus 500-case smoke suites on ~50 PRs a day. Every structural choice below is a consequence of those numbers, not a preference.",
         ],
       },
       {
         heading: "Sizing: what a nightly run actually costs",
         body: [
-          "10,000 test cases sampled 3 times each is 30,000 generation calls; each sample graded once is 30,000 more judge calls, for 60,000 calls per nightly run. The PR smoke suite adds roughly 1,000 calls per PR across ~50 PRs a day, another 50,000 calls. At a blended cost near $0.015/call, that's on the order of $1,500-2,000/day in third-party API spend for evaluation alone.",
-          "That number sizes the worker pool (enough concurrency to clear 60K calls in 30 minutes against a per-provider rate-limit ceiling of roughly 500 req/min) and motivates every cost lever downstream: caching, tiering, and shadow-sampling at 1% instead of mirroring all production traffic.",
+          "10,000 test cases sampled 3 times each is 30,000 generation calls; each sample graded once is 30,000 more judge calls, for 60,000 calls per nightly run. The PR smoke suite adds roughly 1,000 calls per PR across ~50 PRs a day, another 50,000 calls, and shadow evaluation adds a further ~5,000 judge-only calls scoring already-generated production traffic — on the order of $1,500-2,000/day in third-party API spend for evaluation alone at a blended ~$0.015/call.",
+          "That volume sizes the worker pool: clearing 60,000 nightly calls inside a 30-minute window needs roughly 2,000 calls/min of sustained throughput, well above what a single provider's rate limit can absorb alone. That's why the token bucket is per-provider rather than global — generation spreads across whichever providers are under test, and the judge model's own channel is provisioned for the largest share, since every sample needs a judge call regardless of which provider generated it. This also motivates every cost lever downstream: caching, tiering, and shadow-sampling at 1% instead of mirroring all production traffic.",
         ],
       },
       {

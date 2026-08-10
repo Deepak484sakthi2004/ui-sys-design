@@ -23,7 +23,15 @@ function Brand() {
   );
 }
 
-export function Sidebar() {
+export function Sidebar({
+  hidden = false,
+  readMode = false,
+  onCollapse,
+}: {
+  hidden?: boolean;
+  readMode?: boolean;
+  onCollapse?: () => void;
+}) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
@@ -33,7 +41,11 @@ export function Sidebar() {
   return (
     <>
       {/* Mobile top bar */}
-      <div className="sticky top-0 z-30 flex items-center justify-between border-b border-[var(--border)] bg-white/85 px-4 py-3 backdrop-blur lg:hidden">
+      <div
+        className={`sticky top-0 z-30 flex items-center justify-between border-b border-[var(--border)] bg-white/85 px-4 py-3 backdrop-blur lg:hidden ${
+          readMode ? "hidden" : ""
+        }`}
+      >
         <Brand />
         <button
           onClick={() => setOpen((o) => !o)}
@@ -45,14 +57,26 @@ export function Sidebar() {
       </div>
 
       <aside
-        className={`${
-          open ? "block" : "hidden"
-        } lg:sticky lg:top-0 lg:block lg:h-screen lg:w-[292px] lg:shrink-0`}
+        className={`${open ? "block" : "hidden"} lg:sticky lg:top-0 lg:h-screen lg:w-[292px] lg:shrink-0 ${
+          hidden ? "lg:hidden" : "lg:block"
+        }`}
       >
         <div className="thin-scroll flex h-full flex-col overflow-y-auto border-r border-[var(--border)] bg-white/70 backdrop-blur">
           {/* Brand */}
-          <div className="hidden items-center border-b border-[var(--border)] px-5 py-4 lg:flex">
+          <div className="hidden items-center justify-between border-b border-[var(--border)] px-5 py-4 lg:flex">
             <Brand />
+            {onCollapse && (
+              <button
+                onClick={onCollapse}
+                title="Collapse sidebar"
+                className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M3 3v10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              </button>
+            )}
           </div>
 
           <div className="px-5 pb-2 pt-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">

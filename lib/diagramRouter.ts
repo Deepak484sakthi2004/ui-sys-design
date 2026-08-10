@@ -12,10 +12,16 @@ import type { DiagramNode, DiagramEdge, NodeSide } from "@/lib/types";
 
 export const NODE_W = 178;
 export const NODE_H = 96;
-export const COL_W = 236;
+export const COL_W = 284; // wider gutters so edge labels fit between adjacent boxes
 export const ROW_H = 158;
 export const PAD = 8;
-export const CANVAS_MARGIN = 28; // extra room so perimeter lanes/labels don't clip
+// Breathing room around the whole grid so perimeter lanes AND the edge labels
+// centered on them are never clipped (labels on the left/right margins are the
+// worst offenders). Everything shifts by (MARGIN_X, MARGIN_Y).
+const MARGIN_X = 64;
+const MARGIN_Y = 20;
+const MARGIN_R = 64;
+const MARGIN_B = 20;
 
 const TURN_PENALTY = 40;
 const LANE_STEP = 8;
@@ -33,8 +39,8 @@ export interface RoutedEdge {
 
 // --- geometry ---------------------------------------------------------------
 export function nodeBox(n: DiagramNode) {
-  const left = (n.col - 1) * COL_W + (COL_W - NODE_W) / 2 + PAD; // (col-1)*236 + 37
-  const top = (n.row - 1) * ROW_H + (ROW_H - NODE_H) / 2 + PAD; // (row-1)*158 + 39
+  const left = MARGIN_X + (n.col - 1) * COL_W + (COL_W - NODE_W) / 2 + PAD;
+  const top = MARGIN_Y + (n.row - 1) * ROW_H + (ROW_H - NODE_H) / 2 + PAD;
   return {
     left,
     top,
@@ -45,8 +51,8 @@ export function nodeBox(n: DiagramNode) {
   };
 }
 
-const laneX = (g: number) => COL_W * g + PAD;
-const laneY = (g: number) => ROW_H * g + PAD;
+const laneX = (g: number) => MARGIN_X + COL_W * g + PAD;
+const laneY = (g: number) => MARGIN_Y + ROW_H * g + PAD;
 
 export function canvasSize(nodes: DiagramNode[]) {
   const maxCol = Math.max(...nodes.map((n) => n.col));
@@ -54,8 +60,8 @@ export function canvasSize(nodes: DiagramNode[]) {
   return {
     maxCol,
     maxRow,
-    width: maxCol * COL_W + PAD * 2 + CANVAS_MARGIN,
-    height: maxRow * ROW_H + PAD * 2 + CANVAS_MARGIN,
+    width: MARGIN_X + maxCol * COL_W + PAD + MARGIN_R,
+    height: MARGIN_Y + maxRow * ROW_H + PAD + MARGIN_B,
   };
 }
 

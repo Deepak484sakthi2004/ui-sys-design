@@ -105,8 +105,10 @@ export default async function ProblemPage({
         </div>
       </div>
 
-      {/* Diagram */}
-      <div className="mt-6">
+      {/* Diagram — breaks out wider than the prose column so it renders large.
+          On lg+ the sidebar (290px) eats viewport width, so the breakout is
+          sized against (viewport − sidebar); capped so it never overflows. */}
+      <div className="relative left-1/2 mt-6 w-[92vw] -translate-x-1/2 lg:w-[calc(95vw-300px)] lg:max-w-[1120px]">
         <DiagramSection diagram={problem.diagram} steps={problem.diagramSteps} />
       </div>
 

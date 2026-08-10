@@ -6,6 +6,7 @@ import {
   NODE_W,
   NODE_H,
 } from "@/lib/diagramRouter";
+import { ScaledCanvas } from "./ScaledCanvas";
 
 const toneStyles: Record<string, string> = {
   green: "border-emerald-300 bg-emerald-50 text-emerald-900",
@@ -47,8 +48,8 @@ export function SystemDiagram({ diagram, visible, bare, headerRight }: Props) {
   const kindsUsed = Array.from(new Set(diagram.edges.map((e) => e.kind)));
 
   const canvas = (
-    <div className="overflow-x-auto">
-      <div className="relative" style={{ width, height, minWidth: width }}>
+    <ScaledCanvas width={width} height={height}>
+      <div className="relative" style={{ width, height }}>
         <svg
           className="absolute inset-0"
           width={width}
@@ -89,20 +90,6 @@ export function SystemDiagram({ diagram, visible, bare, headerRight }: Props) {
           })}
         </svg>
 
-        {diagram.edges.map((e, i) => {
-          const r = routed[i];
-          if (!r || !e.label) return null;
-          return (
-            <div
-              key={i}
-              className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-white px-1 font-mono text-[10.5px] font-medium"
-              style={{ left: r.labelAt.x, top: r.labelAt.y, color: strokeColor[e.kind] }}
-            >
-              {e.label}
-            </div>
-          );
-        })}
-
         {drawnNodes.map((n: DiagramNode) => {
           const b = nodeBox(n);
           return (
@@ -127,8 +114,23 @@ export function SystemDiagram({ diagram, visible, bare, headerRight }: Props) {
             </div>
           );
         })}
+
+        {/* Edge labels last → always on top, never hidden behind a box. */}
+        {diagram.edges.map((e, i) => {
+          const r = routed[i];
+          if (!r || !e.label) return null;
+          return (
+            <div
+              key={i}
+              className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10.5px] font-medium shadow-sm"
+              style={{ left: r.labelAt.x, top: r.labelAt.y, color: strokeColor[e.kind] }}
+            >
+              {e.label}
+            </div>
+          );
+        })}
       </div>
-    </div>
+    </ScaledCanvas>
   );
 
   if (bare) return canvas;

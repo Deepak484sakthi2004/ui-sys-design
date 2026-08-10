@@ -169,12 +169,14 @@ button {
   margin: 2.2rem 0 0.9rem;
   padding-bottom: 0.4rem;
   border-bottom: 1px solid var(--border);
+  scroll-margin-top: 24px;
 }
 .md-body h3 {
   font-size: 1.15rem;
   font-weight: 700;
   color: var(--ink);
   margin: 1.8rem 0 0.6rem;
+  scroll-margin-top: 24px;
 }
 .md-body h4 {
   font-size: 1rem;
@@ -244,21 +246,39 @@ button {
   border: 1px solid #e3e7ee;
 }
 .md-body pre {
-  margin: 1.1rem 0;
-  padding: 1rem 1.1rem;
-  background: #f7f8fa;
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  position: relative;
+  margin: 1.4rem 0;
+  padding: 2.7rem 1.15rem 1.15rem;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 14px;
   overflow-x: auto;
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 12.75px;
+  line-height: 1.65;
+  box-shadow: 0 10px 26px -14px rgba(15, 23, 42, 0.5);
+}
+/* terminal-style title bar with traffic-light dots */
+.md-body pre::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 36px;
+  border-radius: 14px 14px 0 0;
+  border-bottom: 1px solid #1e293b;
+  background:
+    radial-gradient(circle at 19px 18px, #ff5f57 5px, transparent 5.5px),
+    radial-gradient(circle at 39px 18px, #febc2e 5px, transparent 5.5px),
+    radial-gradient(circle at 59px 18px, #28c840 5px, transparent 5.5px),
+    #16213b;
 }
 .md-body pre code {
   font-family: var(--font-mono);
   background: transparent !important;
   padding: 0 !important;
   border: 0 !important;
-  color: #24324a;
+  color: #cbd5e1;
   white-space: pre;
 }
 .md-table-wrap {

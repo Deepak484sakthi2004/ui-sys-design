@@ -2,7 +2,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSlug from "rehype-slug";
 import rehypeHighlight from "rehype-highlight";
-import "highlight.js/styles/github.css";
+import "highlight.js/styles/github-dark.css";
 
 // Resolve a relative markdown link to an in-app /notes route.
 function resolveHref(href: string | undefined, dir: string): string {

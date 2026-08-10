@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import GithubSlugger from "github-slugger";
 
 // ---------------------------------------------------------------------------
 // Filesystem-backed manifest for the notes library (content/notes/**/*.md).
@@ -153,6 +154,39 @@ export function allDocs(): Doc[] {
 
 export function getAllSlugs(): string[][] {
   return allDocs().map((d) => d.slug.split("/"));
+}
+
+export interface Heading {
+  depth: number;
+  text: string;
+  id: string;
+}
+
+// Extract h2/h3 headings with ids matching rehype-slug (github-slugger), so the
+// TOC anchors line up with the rendered heading ids.
+export function extractHeadings(content: string): Heading[] {
+  const slugger = new GithubSlugger();
+  const out: Heading[] = [];
+  let inFence = false;
+  for (const raw of content.split("\n")) {
+    const line = raw.trimEnd();
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const m = line.match(/^(#{1,6})\s+(.+?)\s*#*$/);
+    if (!m) continue;
+    const depth = m[1].length;
+    const text = m[2]
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\*\*?([^*]+)\*\*?/g, "$1")
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .trim();
+    const id = slugger.slug(text); // advance counters for every heading
+    if (depth === 2 || depth === 3) out.push({ depth, text, id });
+  }
+  return out;
 }
 
 export function getDoc(slugParts: string[]): { title: string; content: string; suite: string; dir: string } | null {

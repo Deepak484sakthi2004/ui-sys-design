@@ -5,28 +5,39 @@ import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { catalog, totalProblems } from "@/data/catalog";
 
+function Brand() {
+  return (
+    <Link href="/" className="flex items-center gap-2.5">
+      <span className="brand-gradient grid h-8 w-8 place-items-center rounded-xl text-white shadow-[var(--shadow-card)]">
+        🔗
+      </span>
+      <div className="leading-tight">
+        <div className="text-[14.5px] font-semibold text-ink">
+          System Design Prep
+        </div>
+        <div className="text-[11px] text-muted">
+          {totalProblems} problems · {catalog.length} tracks
+        </div>
+      </div>
+    </Link>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  // Categories start expanded so the whole curriculum is visible.
   const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
 
-  const toggle = (n: number) =>
-    setCollapsed((c) => ({ ...c, [n]: !c[n] }));
+  const toggle = (n: number) => setCollapsed((c) => ({ ...c, [n]: !c[n] }));
 
   return (
     <>
       {/* Mobile top bar */}
-      <div className="sticky top-0 z-30 flex items-center justify-between border-b border-[var(--border)] bg-white/90 px-4 py-3 backdrop-blur lg:hidden">
-        <Link href="/" className="flex items-center gap-2 font-semibold">
-          <span className="grid h-7 w-7 place-items-center rounded-md bg-brand text-white">
-            🔗
-          </span>
-          System Design Prep
-        </Link>
+      <div className="sticky top-0 z-30 flex items-center justify-between border-b border-[var(--border)] bg-white/85 px-4 py-3 backdrop-blur lg:hidden">
+        <Brand />
         <button
           onClick={() => setOpen((o) => !o)}
-          className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm font-medium"
+          className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm font-medium text-slate-600"
           aria-label="Toggle menu"
         >
           {open ? "Close" : "Menu"}
@@ -36,44 +47,33 @@ export function Sidebar() {
       <aside
         className={`${
           open ? "block" : "hidden"
-        } lg:sticky lg:top-0 lg:block lg:h-screen lg:w-[290px] lg:shrink-0`}
+        } lg:sticky lg:top-0 lg:block lg:h-screen lg:w-[292px] lg:shrink-0`}
       >
-        <div className="thin-scroll flex h-full flex-col overflow-y-auto border-r border-[var(--border)] bg-white">
+        <div className="thin-scroll flex h-full flex-col overflow-y-auto border-r border-[var(--border)] bg-white/70 backdrop-blur">
           {/* Brand */}
-          <div className="hidden items-center gap-2.5 border-b border-[var(--border)] px-5 py-4 lg:flex">
-            <Link href="/" className="flex items-center gap-2.5">
-              <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand text-white shadow-sm">
-                🔗
-              </span>
-              <div className="leading-tight">
-                <div className="text-[15px] font-semibold text-ink">
-                  System Design Prep
-                </div>
-                <div className="text-[11px] text-muted">
-                  {totalProblems} problems · {catalog.length} tracks
-                </div>
-              </div>
-            </Link>
+          <div className="hidden items-center border-b border-[var(--border)] px-5 py-4 lg:flex">
+            <Brand />
           </div>
 
-          {/* All topics header */}
-          <div className="flex items-center justify-between px-5 py-3 text-[13px] font-medium text-muted">
-            <span>All topics ({totalProblems})</span>
+          <div className="px-5 pb-2 pt-4 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+            All topics · {totalProblems}
           </div>
 
-          <nav className="flex-1 px-2 pb-8">
+          <nav className="flex-1 px-2.5 pb-10">
             {catalog.map((cat) => {
               const isCollapsed = collapsed[cat.num];
               return (
-                <div key={cat.num} className="mb-1">
+                <div key={cat.num} className="mb-0.5">
                   <button
                     onClick={() => toggle(cat.num)}
-                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-[13.5px] font-semibold text-ink hover:bg-slate-50"
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13.5px] font-semibold text-ink transition-colors hover:bg-slate-100/70"
                   >
                     <span className="text-[15px]">{cat.emoji}</span>
-                    <span className="tabular-nums text-muted">{cat.num}</span>
+                    <span className="tabular-nums text-[12px] text-slate-400">
+                      {cat.num}
+                    </span>
                     <span className="flex-1">{cat.name}</span>
-                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-muted">
+                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10.5px] font-medium text-slate-500">
                       {cat.problems.length}
                     </span>
                     <svg
@@ -94,30 +94,32 @@ export function Sidebar() {
                   </button>
 
                   {!isCollapsed && (
-                    <ul className="mb-1 ml-3 border-l border-[var(--border)] pl-1.5">
+                    <ul className="mb-1 ml-[18px] mt-0.5 space-y-0.5 border-l border-[var(--border)] pl-2">
                       {cat.problems.map((p) => {
-                        const href = p.ready ? `/${p.slug}` : "#";
                         const active = pathname === `/${p.slug}`;
                         return (
-                          <li key={p.num}>
+                          <li key={p.num} className="relative">
                             {p.ready ? (
                               <Link
-                                href={href}
+                                href={`/${p.slug}`}
                                 onClick={() => setOpen(false)}
-                                className={`flex items-start gap-2 rounded-md px-3 py-1.5 text-[13px] ${
+                                className={`flex items-start gap-2 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors ${
                                   active
-                                    ? "bg-brand-soft font-medium text-brand"
-                                    : "text-slate-600 hover:bg-slate-50"
+                                    ? "bg-brand-soft font-semibold text-brand"
+                                    : "text-slate-600 hover:bg-slate-100/70 hover:text-slate-900"
                                 }`}
                               >
-                                <span className="tabular-nums text-[11px] text-slate-400 pt-0.5">
+                                {active && (
+                                  <span className="brand-gradient absolute -left-[10px] top-1.5 h-[calc(100%-12px)] w-[3px] rounded-full" />
+                                )}
+                                <span className="tabular-nums pt-px text-[11px] text-slate-400">
                                   {p.num}
                                 </span>
                                 <span className="flex-1">{p.title}</span>
                               </Link>
                             ) : (
-                              <div className="flex items-start gap-2 rounded-md px-3 py-1.5 text-[13px] text-slate-400">
-                                <span className="tabular-nums text-[11px] text-slate-300 pt-0.5">
+                              <div className="flex items-start gap-2 rounded-lg px-2.5 py-1.5 text-[13px] text-slate-400">
+                                <span className="tabular-nums pt-px text-[11px] text-slate-300">
                                   {p.num}
                                 </span>
                                 <span className="flex-1">{p.title}</span>

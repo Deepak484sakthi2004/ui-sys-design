@@ -26,16 +26,16 @@ export function CourseTabs({ problem }: { problem: Problem }) {
   return (
     <div>
       {/* Tab bar */}
-      <div className="sticky top-0 z-20 -mx-4 mb-6 border-b border-[var(--border)] bg-[var(--bg)]/95 px-4 py-2 backdrop-blur sm:-mx-6 sm:px-6 lg:top-0">
-        <div className="thin-scroll flex gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-white p-1">
+      <div className="sticky top-0 z-20 -mx-4 mb-6 px-4 py-2.5 sm:-mx-6 sm:px-6 lg:top-0">
+        <div className="thin-scroll flex gap-1 overflow-x-auto rounded-2xl border border-[var(--border)] bg-white/90 p-1.5 shadow-[var(--shadow-card)] backdrop-blur">
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setActive(t.id)}
-              className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-[13.5px] font-medium transition-colors ${
+              className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13.5px] font-medium transition-all ${
                 active === t.id
-                  ? "bg-brand-soft text-brand"
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-700"
+                  ? "bg-brand-soft text-brand shadow-[inset_0_0_0_1px_rgba(79,70,229,0.18)]"
+                  : "text-slate-500 hover:bg-slate-100/70 hover:text-slate-800"
               }`}
             >
               <span>{t.icon}</span>

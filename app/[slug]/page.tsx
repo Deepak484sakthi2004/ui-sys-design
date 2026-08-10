@@ -50,10 +50,10 @@ export default async function ProblemPage({
 
       {/* Header */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <span className="grid h-9 w-9 place-items-center rounded-lg bg-brand text-white">
+        <span className="brand-gradient grid h-10 w-10 place-items-center rounded-xl text-white shadow-[var(--shadow-card)]">
           🔗
         </span>
-        <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] font-medium text-slate-600">
+        <span className="rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-slate-600">
           Foundational
         </span>
         <span
@@ -70,18 +70,18 @@ export default async function ProblemPage({
         )}
       </div>
 
-      <h1 className="text-[28px] font-bold tracking-tight text-ink sm:text-[32px]">
+      <h1 className="text-[30px] font-extrabold tracking-tight text-ink sm:text-[36px]">
         {problem.title}
       </h1>
 
-      <div className="mt-4 space-y-3 border-l-2 border-brand/40 pl-4">
+      <div className="mt-4 space-y-3 rounded-r-lg border-l-[3px] border-transparent [border-image:linear-gradient(180deg,#4f46e5,#7c3aed)_1] pl-4">
         {problem.intro.map((p, i) => (
-          <p key={i} className="text-[15px] leading-relaxed text-slate-700">
+          <p key={i} className="text-[15.5px] leading-relaxed text-slate-700">
             {p}
           </p>
         ))}
         {problem.hardParts && (
-          <p className="text-[15px] leading-relaxed text-slate-700">
+          <p className="text-[15.5px] leading-relaxed text-slate-700">
             <span className="font-semibold text-ink">The hard parts: </span>
             {problem.hardParts.replace(/^The hard parts:\s*/, "")}
           </p>
@@ -90,14 +90,14 @@ export default async function ProblemPage({
 
       {/* Key topics */}
       <div className="mt-5">
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
           Key topics
         </div>
         <div className="flex flex-wrap gap-2">
           {problem.keyTopics.map((t) => (
             <span
               key={t}
-              className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[12px] font-medium text-violet-700"
+              className="rounded-full border border-violet-200/70 bg-violet-50 px-3 py-1 text-[12px] font-medium text-violet-700 shadow-[var(--shadow-card)]"
             >
               {t}
             </span>

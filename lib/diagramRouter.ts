@@ -18,10 +18,10 @@ export const PAD = 8;
 // Breathing room around the whole grid so perimeter lanes AND the edge labels
 // centered on them are never clipped (labels on the left/right margins are the
 // worst offenders). Everything shifts by (MARGIN_X, MARGIN_Y).
-const MARGIN_X = 64;
-const MARGIN_Y = 20;
-const MARGIN_R = 64;
-const MARGIN_B = 20;
+const MARGIN_X = 132;
+const MARGIN_Y = 32;
+const MARGIN_R = 132;
+const MARGIN_B = 32;
 
 const TURN_PENALTY = 40;
 const LANE_STEP = 8;

@@ -1,16 +1,25 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
+import type { Suite } from "@/lib/notes";
 
 // Owns two view states shared across the app:
 //  - sidebar collapsed (desktop): hide the nav, main goes full width
 //  - read mode: distraction-free — nav + all chrome gone, only content + a
 //    subtle exit control. Both persist to localStorage.
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  suites,
+}: {
+  children: React.ReactNode;
+  suites: Suite[];
+}) {
   const [collapsed, setCollapsed] = useState(false);
   const [readMode, setReadMode] = useState(false);
   const [ready, setReady] = useState(false);
+  const router = useRouter();
 
   useEffect(() => {
     try {
@@ -34,6 +43,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [readMode]);
 
+  // "/" jumps to Last-Minute Lookup (unless typing in a field).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = document.activeElement;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || (el as HTMLElement)?.isContentEditable)
+        return;
+      e.preventDefault();
+      router.push("/lookup");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [router]);
+
   const hideSidebar = collapsed || readMode;
 
   return (
@@ -42,6 +66,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       style={{ "--sd-sidebar": hideSidebar ? "0px" : "292px" } as React.CSSProperties}
     >
       <Sidebar
+        suites={suites}
         hidden={hideSidebar}
         readMode={readMode}
         onCollapse={() => setCollapsed(true)}

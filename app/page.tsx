@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { catalog, totalProblems } from "@/data/catalog";
 import { problems } from "@/data/problems";
+import { getSuites, getSuiteMeta } from "@/lib/notes";
 
 const readyCount = Object.keys(problems).length;
 
@@ -14,6 +15,14 @@ const TAB_CARDS: [string, string, string][] = [
 ];
 
 export default function Home() {
+  const suites = getSuites();
+  const totalNotes = suites.reduce((n, s) => n + s.count, 0);
+  const firstDoc = (key: string) => {
+    const s = suites.find((x) => x.key === key);
+    const d = s?.groups.find((g) => g.docs.length)?.docs[0];
+    return d ? `/notes/${d.slug}` : "/lookup";
+  };
+
   return (
     <div className="mx-auto max-w-5xl px-5 py-12 sm:px-8 sm:py-16">
       {/* Hero */}
@@ -67,6 +76,51 @@ export default function Home() {
                 {d}
               </p>
             </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Library suites */}
+      <section className="mt-16">
+        <div className="flex items-end justify-between">
+          <h2 className="text-[22px] font-bold tracking-tight text-ink">
+            The full interview library
+          </h2>
+          <Link
+            href="/lookup"
+            className="rounded-lg border border-[var(--border)] bg-white px-3 py-1.5 text-[13px] font-medium text-slate-600 hover:text-brand"
+          >
+            🔎 Last-minute lookup
+          </Link>
+        </div>
+        <p className="mt-1.5 text-[14.5px] text-slate-600">
+          {totalNotes} deep-dive notes across DSA internals, platform
+          engineering, networking, and full mock interview rounds.
+        </p>
+        <div className="mt-5 grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+          {suites.map((s) => (
+            <Link
+              key={s.key}
+              href={firstDoc(s.key)}
+              className="card card-hover group p-5"
+            >
+              <div className="flex items-center gap-2.5">
+                <span className="grid h-10 w-10 place-items-center rounded-xl bg-brand-soft text-[18px]">
+                  {s.emoji}
+                </span>
+                <div className="min-w-0">
+                  <div className="text-[15px] font-semibold text-ink group-hover:text-brand">
+                    {s.name}
+                  </div>
+                  <div className="text-[11.5px] text-slate-400">
+                    {s.count} notes
+                  </div>
+                </div>
+              </div>
+              <p className="mt-2.5 text-[13px] leading-relaxed text-slate-600">
+                {getSuiteMeta(s.key)?.blurb}
+              </p>
+            </Link>
           ))}
         </div>
       </section>

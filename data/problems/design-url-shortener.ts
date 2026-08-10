@@ -85,6 +85,25 @@ export const urlShortener: Problem = {
     ],
   },
 
+  diagramSteps: [
+    {
+      reveal: ["client", "lb", "redirect", "create"],
+      say: "Two stateless services behind a regional load balancer. Reads and writes never share a path, and at 100 to 1 read-to-write, the redirect side is the one that has to be fast.",
+    },
+    {
+      reveal: ["cdn", "valkey"],
+      say: "Reads outnumber writes 100 to 1, so this is a cache problem. Three layers sit in front of the database: CDN at the edge, an in-process LRU inside each pod, and a shared Valkey cluster. Target: sub-5ms p99 on a hit.",
+    },
+    {
+      reveal: ["scylla"],
+      say: "ScyllaDB stores immutable rows across 3 regions. Each region mints codes from its own prefixed counter range, shuffled by a keyed Feistel and Base62-encoded, so regions never coordinate on the write path.",
+    },
+    {
+      reveal: ["kafka", "flink", "clickhouse"],
+      say: "The redirect drops a click event into Kafka and moves on. Analytics is fire and forget: a Kafka outage costs some analytics events, never a redirect.",
+    },
+  ],
+
   // -------------------------------------------------------------------------
   requirements: {
     functional: [

@@ -118,17 +118,31 @@ export interface DiagramNode {
   row: number; // grid row 1..N
   tone: "green" | "purple" | "orange" | "blue" | "slate";
 }
+export type NodeSide = "N" | "E" | "S" | "W";
 export interface DiagramEdge {
   from: string;
   to: string;
   label?: string;
   kind: "read" | "write" | "analytics";
+  // Optional routing escape hatches — the auto-router works without any of these.
+  exitSide?: NodeSide; // force which side of `from` the edge leaves
+  entrySide?: NodeSide; // force which side of `to` the edge enters
+  lane?: number; // force the de-confliction ordinal in a shared channel
+  waypoints?: { col: number; row: number }[]; // hand-placed control cells
 }
 export interface Diagram {
   caption: string;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
   legend: { kind: "read" | "write" | "analytics"; text: string }[];
+}
+
+// A progressive "rebuild it step by step" walkthrough. Each step reveals the
+// listed node ids (cumulative with earlier steps); edges appear once both of
+// their endpoints are revealed. `say` is the one-line narration for the step.
+export interface DiagramStep {
+  reveal: string[];
+  say: string;
 }
 
 // --- The whole problem ------------------------------------------------------
@@ -143,6 +157,7 @@ export interface Problem {
   keyTopics: string[];
   foundationsReferenced: { label: string; tone: string }[];
   diagram: Diagram;
+  diagramSteps?: DiagramStep[]; // progressive "rebuild it step by step" walkthrough
   requirements: {
     functional: Requirement[];
     nonFunctional: Requirement[];

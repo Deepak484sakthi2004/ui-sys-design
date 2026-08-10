@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { problems, getProblem } from "@/data/problems";
-import { SystemDiagram } from "@/components/SystemDiagram";
+import { DiagramSection } from "@/components/DiagramSection";
 import { CourseTabs } from "@/components/CourseTabs";
 
 export function generateStaticParams() {
@@ -107,7 +107,7 @@ export default async function ProblemPage({
 
       {/* Diagram */}
       <div className="mt-6">
-        <SystemDiagram diagram={problem.diagram} />
+        <DiagramSection diagram={problem.diagram} steps={problem.diagramSteps} />
       </div>
 
       {/* Tabs */}

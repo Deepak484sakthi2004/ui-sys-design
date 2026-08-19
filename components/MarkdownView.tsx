@@ -7,7 +7,7 @@ import "highlight.js/styles/github-dark.css";
 // Resolve a relative markdown link to an in-app /notes route.
 function resolveHref(href: string | undefined, dir: string): string {
   if (!href) return "#";
-  if (/^(https?:|mailto:|tel:|#)/i.test(href)) return href;
+  if (/^(https?:|mailto:|tel:|#|\/)/i.test(href)) return href;
   const [p, hash] = href.split("#");
   const stack = dir ? dir.split("/") : [];
   for (const seg of p.split("/")) {

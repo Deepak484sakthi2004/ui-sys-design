@@ -2157,6 +2157,9 @@ Space: O(h)
 
 ## 17.7 Sub-Pattern 6: Bitmask DP
 
+> **Want 34 hard bitmask DP problems worked end to end, with a live bit-toggle visualizer and
+> per-problem progress tracking?** See the [interactive Bitmask DP guide](/guides/bitmask-dp-guide.html).
+
 ### What It Is
 
 When the problem involves choosing subsets from a *small* set (N <= 20-25), we can represent the chosen subset as a bitmask and use `dp[mask]` to store the answer for that subset. This converts an exponential search space into a structured DP table of size 2^N.

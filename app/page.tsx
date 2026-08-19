@@ -125,6 +125,40 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Standalone guides */}
+      <section className="mt-16">
+        <h2 className="text-[22px] font-bold tracking-tight text-ink">
+          Guides
+        </h2>
+        <p className="mt-1.5 text-[14.5px] text-slate-600">
+          Interactive, self-contained deep dives that don&apos;t fit the six-tab format.
+        </p>
+        <div className="mt-5 grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+          <a
+            href="/guides/bitmask-dp-guide.html"
+            className="card card-hover group p-5"
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="grid h-10 w-10 place-items-center rounded-xl bg-brand-soft text-[18px]">
+                🧩
+              </span>
+              <div className="min-w-0">
+                <div className="text-[15px] font-semibold text-ink group-hover:text-brand">
+                  Bitmask DP
+                </div>
+                <div className="text-[11.5px] text-slate-400">
+                  34 hard problems
+                </div>
+              </div>
+            </div>
+            <p className="mt-2.5 text-[13px] leading-relaxed text-slate-600">
+              Live bit-toggle visualizer, per-problem walkthroughs, and progress tracking
+              for the hardest subset-DP interview problems.
+            </p>
+          </a>
+        </div>
+      </section>
+
       {/* Curriculum */}
       <section className="mt-16">
         <div className="flex items-end justify-between">

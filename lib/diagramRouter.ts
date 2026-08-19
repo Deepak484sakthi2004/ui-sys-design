@@ -450,6 +450,126 @@ function deconflict(routes: (RoutedEdge | null)[]) {
   });
 }
 
+// --- label de-confliction ----------------------------------------------------
+// Path routing keeps arrows clear of boxes, but two unrelated edges can still
+// land their (independently-computed) label midpoints on top of each other,
+// or on top of a node box. Resolve that with a small iterative rectangle-
+// separation pass over rough label/box footprints — cheap for the handful of
+// labels a diagram has, and it converges long before the iteration cap.
+// Label footprints are deliberately over-estimated (real glyph width is closer
+// to 3.9px/char at this font-size) — the extra slack makes the repulsion pass
+// spread labels out more thoroughly and avoids settling into a local optimum
+// that still reads as "touching" even though the raw boxes technically clear.
+const LABEL_CHAR_W = 6.4;
+const LABEL_PAD_X = 14;
+const LABEL_H = 21;
+const LABEL_GAP = 5; // minimum breathing room enforced between boxes
+const DECONFLICT_ITERATIONS = 80;
+
+interface Box {
+  cx: number;
+  cy: number;
+  hw: number;
+  hh: number;
+}
+
+function labelBox(text: string, at: Pt): Box {
+  return {
+    cx: at.x,
+    cy: at.y,
+    hw: (text.length * LABEL_CHAR_W + LABEL_PAD_X) / 2,
+    hh: LABEL_H / 2,
+  };
+}
+
+function overlapAmount(a: Box, b: Box, gap: number) {
+  const dx = b.cx - a.cx;
+  const dy = b.cy - a.cy;
+  const ox = a.hw + b.hw + gap - Math.abs(dx);
+  const oy = a.hh + b.hh + gap - Math.abs(dy);
+  if (ox <= 0 || oy <= 0) return null;
+  return { dx, dy, ox, oy };
+}
+
+function deconflictLabels(
+  routes: (RoutedEdge | null)[],
+  edges: DiagramEdge[],
+  nodeBoxes: Box[],
+) {
+  const movable = routes
+    .map((r, ei) => ({ r, ei }))
+    .filter(({ r, ei }) => r && edges[ei].label)
+    .map(({ r, ei }) => ({ ei, box: labelBox(edges[ei].label!, r!.labelAt) }));
+
+  for (let iter = 0; iter < DECONFLICT_ITERATIONS; iter++) {
+    let moved = false;
+
+    for (const { box } of movable) {
+      for (const nb of nodeBoxes) {
+        const o = overlapAmount(box, nb, LABEL_GAP);
+        if (!o) continue;
+        moved = true;
+        if (o.ox < o.oy) box.cx += Math.sign(o.dx || 1) * o.ox;
+        else box.cy += Math.sign(o.dy || 1) * o.oy;
+      }
+    }
+
+    for (let i = 0; i < movable.length; i++) {
+      for (let j = i + 1; j < movable.length; j++) {
+        const a = movable[i].box;
+        const b = movable[j].box;
+        const o = overlapAmount(a, b, LABEL_GAP);
+        if (!o) continue;
+        moved = true;
+        if (o.ox < o.oy) {
+          const push = o.ox / 2;
+          const s = Math.sign(o.dx || 1);
+          a.cx -= s * push;
+          b.cx += s * push;
+        } else {
+          const push = o.oy / 2;
+          const s = Math.sign(o.dy || 1);
+          a.cy -= s * push;
+          b.cy += s * push;
+        }
+      }
+    }
+
+    if (!moved) break;
+  }
+
+  // The pairwise repulsion above can settle into a local optimum where a
+  // label still sits on a node (competing pushes cancel out, e.g. a label
+  // landing exactly on a node's center). Sweep a grid of candidate offsets
+  // around each remaining conflict and jump to the first clear spot — a
+  // deterministic escape hatch for the handful of cases physics doesn't
+  // resolve on its own.
+  const OFFSETS = [18, -18, 36, -36, 54, -54, 76, -76, 100, -100, 128, -128];
+  const isClear = (box: Box, skipEi: number) =>
+    !nodeBoxes.some((nb) => overlapAmount(box, nb, LABEL_GAP)) &&
+    !movable.some((m) => m.ei !== skipEi && overlapAmount(box, m.box, LABEL_GAP));
+
+  for (const m of movable) {
+    if (isClear(m.box, m.ei)) continue;
+    const origin = { ...m.box };
+    search: for (const dy of [0, ...OFFSETS]) {
+      for (const dx of [0, ...OFFSETS]) {
+        if (dx === 0 && dy === 0) continue;
+        const cand: Box = { ...origin, cx: origin.cx + dx, cy: origin.cy + dy };
+        if (isClear(cand, m.ei)) {
+          m.box.cx = cand.cx;
+          m.box.cy = cand.cy;
+          break search;
+        }
+      }
+    }
+  }
+
+  for (const { ei, box } of movable) {
+    routes[ei]!.labelAt = { x: round(box.cx), y: round(box.cy) };
+  }
+}
+
 // --- public API -------------------------------------------------------------
 export function routeAll(
   edges: DiagramEdge[],
@@ -470,5 +590,10 @@ export function routeAll(
     return routeOne(e, byId, occ, maxCol, maxRow);
   });
   deconflict(routes);
+  const nodeBoxes = drawn.map((n) => {
+    const b = nodeBox(n);
+    return { cx: b.cx, cy: b.cy, hw: NODE_W / 2, hh: NODE_H / 2 };
+  });
+  deconflictLabels(routes, edges, nodeBoxes);
   return routes;
 }

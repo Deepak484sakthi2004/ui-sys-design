@@ -95,6 +95,7 @@ export function SystemDiagram({ diagram, visible, bare, headerRight }: Props) {
           return (
             <div
               key={n.id}
+              data-role="diagram-node"
               className={`absolute flex flex-col items-center justify-center rounded-lg border px-2 text-center shadow-sm ${toneStyles[n.tone] ?? toneStyles.slate}`}
               style={{ left: b.left, top: b.top, width: NODE_W, height: NODE_H }}
             >
@@ -122,6 +123,7 @@ export function SystemDiagram({ diagram, visible, bare, headerRight }: Props) {
           return (
             <div
               key={i}
+              data-role="diagram-edge-label"
               className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10.5px] font-medium shadow-sm"
               style={{ left: r.labelAt.x, top: r.labelAt.y, color: strokeColor[e.kind] }}
             >

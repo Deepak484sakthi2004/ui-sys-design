@@ -217,13 +217,24 @@ code{
     padding-top:20px;
   }
   .side.open{transform:none}
+  .backdrop{
+    display:none; position:fixed; inset:0; background:rgba(20,23,26,.32); z-index:55;
+  }
+  .backdrop.open{display:block}
   .mast{position:static}
   h2.prob{scroll-margin-top:14px}
   main{padding:20px 18px 120px}
   .mast-in{padding:11px 18px}
   .brand p{font-size:10px}
   .menu{margin-bottom:9px}
-  .mb{width:13px; height:19px}
+  /* Signature bit-row becomes a single horizontally-scrollable strip so it
+     doesn't wrap into several rows and dominate short/landscape viewports;
+     boxes grow slightly to stay within touch-target size guidelines. */
+  .maskbits{flex-wrap:nowrap; overflow-x:auto; padding-bottom:5px; -webkit-overflow-scrolling:touch}
+  .mb{width:20px; height:26px; flex:0 0 auto}
+  .tick{width:28px; height:28px}
+  .nav-h{padding:10px 6px}
+  .nav-p{padding:8px 7px}
   body{font-size:16px}
   h2.prob{font-size:17px}
 }
@@ -250,6 +261,7 @@ code{
 </header>
 
 <div class="shell">
+  <div class="backdrop" id="backdrop"></div>
   <aside class="side" id="side">
     <input class="find" id="find" placeholder="filter problems…" aria-label="Filter problems">
     <div class="nav-sec" data-sec="00"><button class="nav-h" data-sec="00"><span class="nav-num">00</span><span class="nav-label">Method</span><span class="nav-count"></span></button><div class="nav-items"></div></div><div class="nav-sec" data-sec="01"><button class="nav-h" data-sec="01"><span class="nav-num">01</span><span class="nav-label">Enumeration &amp; BFS</span><span class="nav-count">6</span></button><div class="nav-items"><a class="nav-p" href="#p2151" data-pid="2151"><span class="nav-bit" data-pid="2151"></span><span class="nav-id">2151</span><span class="nav-t">Maximum Good People Based on Statements</span></a><a class="nav-p" href="#p1601" data-pid="1601"><span class="nav-bit" data-pid="1601"></span><span class="nav-id">1601</span><span class="nav-t">Maximum Number of Achievable Transfer Requests</span></a><a class="nav-p" href="#p980" data-pid="980"><span class="nav-bit" data-pid="980"></span><span class="nav-id">980</span><span class="nav-t">Unique Paths III</span></a><a class="nav-p" href="#p847" data-pid="847"><span class="nav-bit" data-pid="847"></span><span class="nav-id">847</span><span class="nav-t">Shortest Path Visiting All Nodes</span></a><a class="nav-p" href="#p864" data-pid="864"><span class="nav-bit" data-pid="864"></span><span class="nav-id">864</span><span class="nav-t">Shortest Path to Get All Keys</span></a><a class="nav-p" href="#p1284" data-pid="1284"><span class="nav-bit" data-pid="1284"></span><span class="nav-id">1284</span><span class="nav-t">Minimum Number of Flips to Convert Binary Matrix to Zero Matrix</span></a></div></div><div class="nav-sec" data-sec="02"><button class="nav-h" data-sec="02"><span class="nav-num">02</span><span class="nav-label">Assignment &amp; TSP</span><span class="nav-count">9</span></button><div class="nav-items"><a class="nav-p" href="#p1879" data-pid="1879"><span class="nav-bit" data-pid="1879"></span><span class="nav-id">1879</span><span class="nav-t">Minimum XOR Sum of Two Arrays</span></a><a class="nav-p" href="#p2172" data-pid="2172"><span class="nav-bit" data-pid="2172"></span><span class="nav-id">2172</span><span class="nav-t">Maximum AND Sum of Array</span></a><a class="nav-p" href="#p1434" data-pid="1434"><span class="nav-bit" data-pid="1434"></span><span class="nav-id">1434</span><span class="nav-t">Number of Ways to Wear Different Hats to Each Other</span></a><a class="nav-p" href="#p1595" data-pid="1595"><span class="nav-bit" data-pid="1595"></span><span class="nav-id">1595</span><span class="nav-t">Minimum Cost to Connect Two Groups of Points</span></a><a class="nav-p" href="#p2403" data-pid="2403"><span class="nav-bit" data-pid="2403"></span><span class="nav-id">2403</span><span class="nav-t">Minimum Time to Kill All Monsters</span></a><a class="nav-p" href="#p996" data-pid="996"><span class="nav-bit" data-pid="996"></span><span class="nav-id">996</span><span class="nav-t">Number of Squareful Arrays</span></a><a class="nav-p" href="#p1799" data-pid="1799"><span class="nav-bit" data-pid="1799"></span><span class="nav-id">1799</span><span class="nav-t">Maximize Score After N Operations</span></a><a class="nav-p" href="#p943" data-pid="943"><span class="nav-bit" data-pid="943"></span><span class="nav-id">943</span><span class="nav-t">Find the Shortest Superstring</span></a><a class="nav-p" href="#p3149" data-pid="3149"><span class="nav-bit" data-pid="3149"></span><span class="nav-id">3149</span><span class="nav-t">Find the Minimum Cost Array Permutation</span></a></div></div><div class="nav-sec" data-sec="03"><button class="nav-h" data-sec="03"><span class="nav-num">03</span><span class="nav-label">Submask &amp; Partition</span><span class="nav-count">7</span></button><div class="nav-items"><a class="nav-p" href="#p1681" data-pid="1681"><span class="nav-bit" data-pid="1681"></span><span class="nav-id">1681</span><span class="nav-t">Minimum Incompatibility</span></a><a class="nav-p" href="#p1723" data-pid="1723"><span class="nav-bit" data-pid="1723"></span><span class="nav-id">1723</span><span class="nav-t">Find Minimum Time to Finish All Jobs</span></a><a class="nav-p" href="#p1655" data-pid="1655"><span class="nav-bit" data-pid="1655"></span><span class="nav-id">1655</span><span class="nav-t">Distribute Repeating Integers</span></a><a class="nav-p" href="#p465" data-pid="465"><span class="nav-bit" data-pid="465"></span><span class="nav-id">465</span><span class="nav-t">Optimal Account Balancing</span></a><a class="nav-p" href="#p1494" data-pid="1494"><span class="nav-bit" data-pid="1494"></span><span class="nav-id">1494</span><span class="nav-t">Parallel Courses II</span></a><a class="nav-p" href="#p1125" data-pid="1125"><span class="nav-bit" data-pid="1125"></span><span class="nav-id">1125</span><span class="nav-t">Smallest Sufficient Team</span></a><a class="nav-p" href="#p691" data-pid="691"><span class="nav-bit" data-pid="691"></span><span class="nav-id">691</span><span class="nav-t">Stickers to Spell Word</span></a></div></div><div class="nav-sec" data-sec="04"><button class="nav-h" data-sec="04"><span class="nav-num">04</span><span class="nav-label">Mask as Domain</span><span class="nav-count">5</span></button><div class="nav-items"><a class="nav-p" href="#p1178" data-pid="1178"><span class="nav-bit" data-pid="1178"></span><span class="nav-id">1178</span><span class="nav-t">Number of Valid Words for Each Puzzle</span></a><a class="nav-p" href="#p1994" data-pid="1994"><span class="nav-bit" data-pid="1994"></span><span class="nav-id">1994</span><span class="nav-t">The Number of Good Subsets</span></a><a class="nav-p" href="#p2732" data-pid="2732"><span class="nav-bit" data-pid="2732"></span><span class="nav-id">2732</span><span class="nav-t">Find a Good Subset of the Matrix</span></a><a class="nav-p" href="#p3276" data-pid="3276"><span class="nav-bit" data-pid="3276"></span><span class="nav-id">3276</span><span class="nav-t">Select Cells in Grid with Given Conditions</span></a><a class="nav-p" href="#p3116" data-pid="3116"><span class="nav-bit" data-pid="3116"></span><span class="nav-id">3116</span><span class="nav-t">Kth Smallest Amount With Single Denomination Combination</span></a></div></div><div class="nav-sec" data-sec="05"><button class="nav-h" data-sec="05"><span class="nav-num">05</span><span class="nav-label">Profile, MITM, General</span><span class="nav-count">7</span></button><div class="nav-items"><a class="nav-p" href="#p1349" data-pid="1349"><span class="nav-bit" data-pid="1349"></span><span class="nav-id">1349</span><span class="nav-t">Maximum Students Taking Exam</span></a><a class="nav-p" href="#p1659" data-pid="1659"><span class="nav-bit" data-pid="1659"></span><span class="nav-id">1659</span><span class="nav-t">Maximize Grid Happiness</span></a><a class="nav-p" href="#p2035" data-pid="2035"><span class="nav-bit" data-pid="2035"></span><span class="nav-id">2035</span><span class="nav-t">Partition Array Into Two Arrays to Minimize Sum Difference</span></a><a class="nav-p" href="#p1755" data-pid="1755"><span class="nav-bit" data-pid="1755"></span><span class="nav-id">1755</span><span class="nav-t">Closest Subsequence Sum</span></a><a class="nav-p" href="#p805" data-pid="805"><span class="nav-bit" data-pid="805"></span><span class="nav-id">805</span><span class="nav-t">Split Array With Same Average</span></a><a class="nav-p" href="#p956" data-pid="956"><span class="nav-bit" data-pid="956"></span><span class="nav-id">956</span><span class="nav-t">Tallest Billboard</span></a><a class="nav-p" href="#p1815" data-pid="1815"><span class="nav-bit" data-pid="1815"></span><span class="nav-id">1815</span><span class="nav-t">Maximum Number of Groups Getting Fresh Donuts</span></a></div></div>
@@ -2355,7 +2367,7 @@ function show(sec, pid){
   }else{
     window.scrollTo({top:0, behavior:"smooth"});
   }
-  if(window.innerWidth <= 900) document.getElementById("side").classList.remove("open");
+  if(window.innerWidth <= 900) setDrawer(false);
 }
 
 document.addEventListener("click", e => {
@@ -2372,8 +2384,13 @@ document.addEventListener("click", e => {
   if(link){ e.preventDefault(); const p = byId[link.dataset.pid]; show(p.sec, p.id); return; }
 });
 
+function setDrawer(open){
+  document.getElementById("side").classList.toggle("open", open);
+  document.getElementById("backdrop").classList.toggle("open", open);
+}
 document.getElementById("menu").onclick = () =>
-  document.getElementById("side").classList.toggle("open");
+  setDrawer(!document.getElementById("side").classList.contains("open"));
+document.getElementById("backdrop").onclick = () => setDrawer(false);
 
 document.getElementById("reset").onclick = () => {
   if(!solved.size) return;

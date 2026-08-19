@@ -46,7 +46,7 @@ export default async function NotePage({
   return (
     <div className="mx-auto max-w-[1200px] px-5 py-8 sm:px-8 sm:py-10 xl:grid xl:grid-cols-[minmax(0,1fr)_232px] xl:gap-12">
       <ReadingProgress />
-      <div className="mx-auto w-full max-w-3xl xl:mx-0">
+      <div className="mx-auto w-full min-w-0 max-w-3xl xl:mx-0">
         <div className="mb-5 flex items-center gap-2 text-[12.5px] text-slate-400">
           <Link href="/" className="hover:text-slate-600">
             Home

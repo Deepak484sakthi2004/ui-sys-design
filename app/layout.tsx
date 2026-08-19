@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
@@ -14,6 +14,11 @@ export const metadata: Metadata = {
   title: "System Design Prep — Interview Course",
   description:
     "A hands-on system design interview course. Requirements, teardowns, cheat sheets, a 40-minute playbook, and level-based scoring for each classic problem.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({

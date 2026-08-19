@@ -62,7 +62,7 @@ export function AppShell({
 
   return (
     <div
-      className="flex min-h-screen"
+      className="flex min-h-screen flex-col lg:flex-row"
       style={{ "--sd-sidebar": hideSidebar ? "0px" : "292px" } as React.CSSProperties}
     >
       <Sidebar
